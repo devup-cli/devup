@@ -27,6 +27,7 @@ def _run_node_cli(args: list[str], cwd: Path | None = None, env: dict[str, str] 
         env=env,
         capture_output=True,
         text=True,
+        timeout=25,
         check=False,
     )
 
@@ -40,6 +41,7 @@ def _run_py_cli(args: list[str], cwd: Path | None = None, env: dict[str, str] | 
         env=merged_env,
         capture_output=True,
         text=True,
+        timeout=25,
         check=False,
     )
 
@@ -107,13 +109,21 @@ class NpmParityAndConflictsTests(unittest.TestCase):
         ex_dir = REPO_ROOT / "examples" / "fastapi-react"
         for label, runner_fn in (("python", _run_py_cli), ("node", _run_node_cli)):
             with tempfile.TemporaryDirectory() as td:
-                # Copy fastapi-react to temp and add a quick one-shot consumer that fails-fast on purpose
-                # or stops cleanly after api passes ready_url so we test live startup + HTTP probe + teardown.
                 work = Path(td) / "fastapi-react"
                 shutil.copytree(ex_dir, work)
-                probe_cmd = f'"{sys.executable}" -c "import urllib.request; print(urllib.request.urlopen(\'http://127.0.0.1:8000/health\').read().decode()); raise SystemExit(1)"'
+                probe_cmd = (
+                    f'"{sys.executable}" -c "import urllib.request; '
+                    "print(urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5).read().decode()); "
+                    'raise SystemExit(1)"'
+                )
+                base_toml = (ex_dir / "devup.toml").read_text(encoding="utf-8")
+                # Use sys.executable reliably across OSes and disable watch in this one-shot parity test
+                # so any readiness timeout exits promptly instead of spinning in watch mode.
+                api_cmd = f'"{sys.executable}" main.py'
+                base_toml = base_toml.replace('command = "python main.py"', f"command = {json.dumps(api_cmd)}")
+                base_toml = base_toml.replace('watch = ["*.py"]', "watch = false")
                 (work / "devup.toml").write_text(
-                    (ex_dir / "devup.toml").read_text(encoding="utf-8")
+                    base_toml
                     + f'\n[tasks.check]\ncommand = {json.dumps(probe_cmd)}\ndepends_on = ["api"]\n',
                     encoding="utf-8",
                 )
