@@ -111,3 +111,30 @@ jobs:
           & "$env:USERPROFILE\scoop\shims\devup.cmd" --version
           & "$env:USERPROFILE\scoop\shims\devup.cmd" doctor --json | Out-Null
           scoop uninstall devup
+
+  npm-package:
+    name: Node.js ${{ matrix.os }} (Node ${{ matrix.node-version }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node-version: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+      - name: Run npm package unit tests
+        working-directory: packages/npm
+        run: npm test
+      - name: Verify npm pack and global tarball install
+        shell: bash
+        working-directory: packages/npm
+        run: |
+          node bin/devup.js --version
+          TGZ="$(npm pack --silent)"
+          npm install -g "./$TGZ"
+          devup --version
+          devup -C ../../examples/fastapi-react list --json > /dev/null
+          npm uninstall -g @devup-cli/devup

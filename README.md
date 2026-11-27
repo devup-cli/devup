@@ -67,13 +67,17 @@ Zero third-party runtime dependencies — pure Python 3.11+ standard library.
 ## Installation
 
 ```bash
-# Run once without installing (via uv)
+# Run once without installing (via uv or npx)
 uvx --from devup-cli devup --help
+# or with Node.js 20+ (no Python required)
+npx @devup-cli/devup --help
 
-# Install globally with pipx or uv (recommended)
+# Install globally with pipx, uv, or npm (recommended)
 pipx install devup-cli
 # or
 uv tool install devup-cli
+# or
+npm install -g @devup-cli/devup
 
 # Or directly from GitHub
 pipx install git+https://github.com/devup-cli/devup.git

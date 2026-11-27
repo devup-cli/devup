@@ -1,0 +1,46 @@
+{
+  "name": "@devup-cli/devup",
+  "version": "0.3.0",
+  "description": "Polyglot project script discovery and multi-service parallel runner with colored logs and clean Ctrl+C shutdown.",
+  "type": "module",
+  "bin": {
+    "devup": "./bin/devup.js"
+  },
+  "files": [
+    "bin/",
+    "src/",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "keywords": [
+    "cli",
+    "dev",
+    "devtools",
+    "dotenv",
+    "monorepo",
+    "polyglot",
+    "process-manager",
+    "runner",
+    "task-runner"
+  ],
+  "author": "devup contributors",
+  "license": "MIT",
+  "homepage": "https://devup-cli.github.io/devup/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devup-cli/devup.git",
+    "directory": "packages/npm"
+  },
+  "bugs": {
+    "url": "https://github.com/devup-cli/devup/issues"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

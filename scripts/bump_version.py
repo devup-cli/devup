@@ -64,6 +64,14 @@ def bump_version(new_version: str, root: Path = ROOT) -> list[Path]:
             formula.write_text(new_rb, encoding="utf-8")
             updated.append(formula)
 
+    pkg_json = root / "packages" / "npm" / "package.json"
+    if pkg_json.is_file():
+        pkg_data = json.loads(pkg_json.read_text(encoding="utf-8"))
+        if pkg_data.get("version") != new_version:
+            pkg_data["version"] = new_version
+            pkg_json.write_text(json.dumps(pkg_data, indent=2) + "\n", encoding="utf-8")
+            updated.append(pkg_json)
+
     changelog = root / "CHANGELOG.md"
     if changelog.is_file():
         cl_text = changelog.read_text(encoding="utf-8")
