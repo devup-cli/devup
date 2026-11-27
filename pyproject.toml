@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [
     { name = "devup contributors" },
 ]
-keywords = ["cli", "devtools", "process-manager", "monorepo", "polyglot", "runner"]
+keywords = ["cli", "developer-tools", "devtools", "dotenv", "monorepo", "polyglot", "process-manager", "python", "task-runner"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Environment :: Console",
