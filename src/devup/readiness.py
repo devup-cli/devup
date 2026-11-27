@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
+import http.client
 import socket
-import urllib.error
 import urllib.parse
-import urllib.request
 
 
 def normalize_tcp_target(spec: str | int) -> str:
@@ -72,14 +71,24 @@ def validate_ready_url(url: str) -> str:
 
 def probe_http(url: str, timeout: float = 0.5) -> bool:
     """Return True if an HTTP(S) GET request responds with a 2xx or 3xx status."""
-    req = urllib.request.Request(url, method="GET", headers={"User-Agent": "devup-readiness/1.0"})
-    try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            status = getattr(resp, "status", 200)
-            return 200 <= int(status) < 400
-    except urllib.error.HTTPError as exc:
-        ok = 200 <= exc.code < 400
-        exc.close()
-        return ok
-    except (OSError, urllib.error.URLError, ValueError):
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
         return False
+
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    conn_cls = (
+        http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    )
+    conn = conn_cls(parsed.netloc, timeout=timeout)
+    try:
+        conn.request("GET", path, headers={"User-Agent": "devup-readiness/1.0", "Connection": "close"})
+        resp = conn.getresponse()
+        resp.read()
+        return 200 <= resp.status < 400
+    except (OSError, http.client.HTTPException, ValueError):
+        return False
+    finally:
+        conn.close()

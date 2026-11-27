@@ -216,22 +216,27 @@ class ReadinessProbeTests(unittest.TestCase):
             srv_script.write_text(
                 "import http.server, threading, time\n"
                 "calls = 0\n"
+                "done = threading.Event()\n"
                 "class H(http.server.BaseHTTPRequestHandler):\n"
                 "    def do_GET(self):\n"
                 "        global calls\n"
                 "        calls += 1\n"
                 "        code = 503 if calls < 3 else 200\n"
                 "        self.send_response(code)\n"
+                "        self.send_header('Content-Length', '2')\n"
                 "        self.end_headers()\n"
                 "        self.wfile.write(b'ok')\n"
-                "        if calls == 3:\n"
+                "        if calls >= 3:\n"
                 "            print('HTTP_200_SERVED', flush=True)\n"
+                "            done.set()\n"
                 "    def log_message(self, *args):\n"
                 "        pass\n"
                 f"srv = http.server.HTTPServer(('127.0.0.1', {port}), H)\n"
                 "threading.Thread(target=srv.serve_forever, daemon=True).start()\n"
-                "time.sleep(1.2)\n"
-                "srv.shutdown()\n",
+                "done.wait(timeout=4.5)\n"
+                "time.sleep(0.2)\n"
+                "srv.shutdown()\n"
+                "srv.server_close()\n",
                 encoding="utf-8",
             )
             url = f"http://127.0.0.1:{port}/health"
@@ -263,7 +268,7 @@ class ReadinessProbeTests(unittest.TestCase):
                 stream=buf,
             )
             output = buf.getvalue()
-            self.assertEqual([r.status for r in results], ["ok", "ok"])
+            self.assertEqual([r.status for r in results], ["ok", "ok"], msg=output)
             self.assertIn(f"ready ({url})", output)
             self.assertLess(output.index("HTTP_200_SERVED"), output.index("WEB_AFTER_HTTP"))
 
