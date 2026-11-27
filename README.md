@@ -1,7 +1,12 @@
+<p align="center">
+  <img src="assets/logo.svg" alt="devup logo" width="84" height="84" />
+</p>
+
 # devup
 
 [![CI](https://github.com/devup-cli/devup/actions/workflows/ci.yml/badge.svg)](https://github.com/devup-cli/devup/actions/workflows/ci.yml)
 [![PyPI](https://img.shields.io/pypi/v/devup-cli)](https://pypi.org/project/devup-cli/)
+[![PyPI Downloads](https://img.shields.io/pypi/dm/devup-cli)](https://pypi.org/project/devup-cli/)
 [![Python](https://img.shields.io/pypi/pyversions/devup-cli)](https://pypi.org/project/devup-cli/)
 [![License](https://img.shields.io/github/license/devup-cli/devup)](LICENSE)
 
@@ -75,6 +80,25 @@ pipx install git+https://github.com/devup-cli/devup.git
 
 # Or install locally from a cloned checkout
 pip install -e .
+
+# Homebrew (macOS / Linux via formula in packaging/homebrew/devup-cli.rb)
+brew install --build-from-source ./packaging/homebrew/devup-cli.rb
+
+# Scoop (Windows via manifest in packaging/scoop/devup.json)
+scoop install ./packaging/scoop/devup.json
+```
+
+### Shell Autocompletion
+
+```bash
+# Bash
+source <(devup completion bash)
+# Zsh
+source <(devup completion zsh)
+# Fish
+devup completion fish | source
+# PowerShell
+devup completion powershell | Out-String | Invoke-Expression
 ```
 
 ## Quick Start
@@ -146,6 +170,15 @@ cwd = "frontend"
 port = 5173
 depends_on = ["api"]
 ```
+
+## Documentation
+
+* [Documentation Website](https://devup-cli.github.io/devup/)
+* [5-Minute Getting Started](docs/getting-started.md)
+* [CLI Command Reference](docs/cli-reference.md)
+* [`devup.toml` Configuration Reference](docs/configuration.md)
+* [Troubleshooting & FAQ](docs/troubleshooting.md)
+* [Examples](examples/README.md)
 
 ## Running Tests
 

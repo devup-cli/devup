@@ -1,0 +1,8 @@
+{
+  "name": "node-monorepo",
+  "private": true,
+  "workspaces": ["apps/*"],
+  "scripts": {
+    "lint": "eslint ."
+  }
+}

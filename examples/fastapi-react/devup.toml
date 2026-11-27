@@ -1,0 +1,19 @@
+default = ["dev"]
+fail_fast = true
+auto_env = true
+
+[groups]
+dev = ["api", "web"]
+
+[tasks.api]
+command = "python main.py"
+cwd = "backend"
+port = 8000
+ready_url = "http://127.0.0.1:8000/health"
+watch = ["*.py"]
+
+[tasks.web]
+command = "npm run dev"
+cwd = "frontend"
+port = 5173
+depends_on = ["api"]

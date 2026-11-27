@@ -1,0 +1,25 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-label="devup logo">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0D1117"/>
+      <stop offset="100%" stop-color="#161B22"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#58A6FF"/>
+      <stop offset="100%" stop-color="#3FB950"/>
+    </linearGradient>
+  </defs>
+  <rect x="8" y="8" width="240" height="240" rx="44" fill="url(#bgGrad)" stroke="#30363D" stroke-width="4"/>
+  <!-- Window dots -->
+  <circle cx="44" cy="38" r="7" fill="#FF5F56"/>
+  <circle cx="68" cy="38" r="7" fill="#FFBD2E"/>
+  <circle cx="92" cy="38" r="7" fill="#27C93F"/>
+  <!-- Terminal prompt chevron -->
+  <path d="M52 104 L92 134 L52 164" fill="none" stroke="url(#accentGrad)" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <!-- Parallel service stream bars -->
+  <rect x="116" y="96" width="88" height="18" rx="9" fill="#58A6FF"/>
+  <rect x="116" y="125" width="68" height="18" rx="9" fill="#D29922"/>
+  <rect x="116" y="154" width="88" height="18" rx="9" fill="#3FB950"/>
+  <!-- Upward launch indicator -->
+  <path d="M196 196 L210 182 L224 196" fill="none" stroke="#BC8CFF" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

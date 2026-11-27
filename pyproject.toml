@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "devup-cli"
-version = "0.2.0"
+version = "0.3.0"
 description = "Polyglot project script discovery and multi-service parallel runner with colored logs and clean Ctrl+C shutdown."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -31,6 +31,7 @@ dependencies = []
 
 [project.urls]
 Homepage = "https://github.com/devup-cli/devup"
+Documentation = "https://devup-cli.github.io/devup/"
 Repository = "https://github.com/devup-cli/devup"
 Issues = "https://github.com/devup-cli/devup/issues"
 

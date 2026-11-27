@@ -4,26 +4,117 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 from typing import Sequence, TextIO
 
 from devup import __version__
 from devup.colors import BOLD, CYAN, DIM, GREEN, RED, YELLOW, enable_windows_ansi, style, supports_color
+from devup.completions import SUPPORTED_SHELLS, generate_completion
+from devup.diagnostics import run_doctor, validate_workspace
 from devup.discovery import discover_workspace, resolve_targets
 from devup.models import TaskResult, WorkspaceConfig
 from devup.picker import PickChoice, pick_targets
 from devup.runner import RunOptions, run_tasks
+from devup.updates import check_for_update
 
-_SUBCOMMANDS = {"list", "ls", "run", "pick", "init"}
+_SUBCOMMANDS = {"list", "ls", "run", "pick", "init", "validate", "doctor", "completion"}
+
+_INIT_TEMPLATES: dict[str, str] = {
+    "fullstack": """default = ["dev"]
+fail_fast = true
+strict_ports = false
+auto_env = true
+shutdown_timeout = 5.0
+
+[groups]
+dev = ["api", "web"]
+
+[tasks.api]
+command = "uvicorn app.main:app --reload --port 8000"
+cwd = "backend"
+port = 8000
+ready_url = "http://127.0.0.1:8000/health"
+watch = ["app/**/*.py"]
+
+[tasks.web]
+command = "npm run dev"
+cwd = "frontend"
+port = 5173
+depends_on = ["api"]
+""",
+    "python-node": """default = ["dev"]
+fail_fast = true
+auto_env = true
+
+[groups]
+dev = ["api", "web"]
+
+[tasks.api]
+command = "uvicorn main:app --reload --port 8000"
+cwd = "backend"
+port = 8000
+ready_url = "http://127.0.0.1:8000/health"
+
+[tasks.web]
+command = "npm run dev"
+cwd = "frontend"
+port = 5173
+depends_on = ["api"]
+""",
+    "java-microservices": """default = ["dev"]
+fail_fast = true
+strict_ports = true
+
+[groups]
+dev = ["infra", "api"]
+
+[tasks.infra]
+command = "docker compose up postgres"
+port = 5432
+ready_tcp = "127.0.0.1:5432"
+ready_timeout = 30
+
+[tasks.api]
+command = "mvn spring-boot:run"
+cwd = "service"
+port = 8080
+depends_on = ["infra"]
+ready_url = "http://127.0.0.1:8080/actuator/health"
+ready_timeout = 45
+""",
+    "docker-compose": """default = ["stack"]
+fail_fast = true
+
+[groups]
+stack = ["db", "cache", "app"]
+
+[tasks.db]
+command = "docker compose up postgres"
+port = 5432
+ready_tcp = "127.0.0.1:5432"
+
+[tasks.cache]
+command = "docker compose up redis"
+port = 6379
+ready_tcp = "127.0.0.1:6379"
+
+[tasks.app]
+command = "docker compose up app"
+port = 8000
+depends_on = ["db", "cache"]
+ready_url = "http://127.0.0.1:8000/health"
+""",
+}
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="devup",
         description=(
-            "Discover scripts across package.json, pyproject.toml, Makefile, Justfile, "
-            "Docker Compose, and devup.toml, and run multiple services in parallel."
+            "Discover scripts across package.json, pyproject.toml, pom.xml, build.gradle, "
+            "Makefile, Justfile, Docker Compose, and devup.toml, and run services in parallel."
         ),
     )
     parser.add_argument(
@@ -98,7 +189,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--json",
         action="store_true",
-        help="Output discovered tasks and groups as JSON (used with `list`).",
+        help="Output JSON (used with `list`, `validate`, `doctor`).",
     )
     parser.add_argument(
         "--force",
@@ -106,9 +197,43 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Overwrite an existing devup.toml (used with `init`).",
     )
     parser.add_argument(
+        "--template",
+        choices=("auto", *tuple(_INIT_TEMPLATES.keys())),
+        default="auto",
+        help="Preset template for `devup init`.",
+    )
+    parser.add_argument(
+        "--interactive",
+        action="store_true",
+        help="Prompt for configuration options during `devup init`.",
+    )
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help="Skip interactive prompts during `devup init`.",
+    )
+    parser.add_argument(
+        "--online",
+        action="store_true",
+        help="Query PyPI during `devup doctor` to check for newer releases.",
+    )
+    parser.add_argument(
+        "--check-updates",
+        action="store_true",
+        help="Check PyPI (24h cached) for a newer release of devup-cli.",
+    )
+    parser.add_argument(
+        "--no-update-check",
+        action="store_true",
+        help="Disable update availability notifications.",
+    )
+    parser.add_argument(
         "targets",
         nargs="*",
-        help="Subcommand (list, run, pick, init) or task/group names to run in parallel.",
+        help=(
+            "Subcommand (list, run, pick, init, validate, doctor, completion) "
+            "or task/group names to run in parallel."
+        ),
     )
     return parser
 
@@ -203,7 +328,24 @@ def _interactive_pick(
     return pick_targets(choices, out=out, use_color=use_color)
 
 
-def _init_devup_toml(config: WorkspaceConfig, force: bool, out: TextIO, use_color: bool) -> int:
+def _prompt_line(out: TextIO, in_stream: TextIO, prompt: str, default: str = "") -> str:
+    out.write(prompt)
+    out.flush()
+    raw = in_stream.readline()
+    stripped = raw.strip()
+    return stripped if stripped else default
+
+
+def _init_devup_toml(
+    config: WorkspaceConfig,
+    force: bool,
+    out: TextIO,
+    use_color: bool,
+    template: str = "auto",
+    interactive: bool = False,
+    yes: bool = False,
+    stdin: TextIO | None = None,
+) -> int:
     target_path = config.root / "devup.toml"
     if target_path.exists() and not force:
         out.write(
@@ -215,34 +357,202 @@ def _init_devup_toml(config: WorkspaceConfig, force: bool, out: TextIO, use_colo
         )
         return 1
 
+    in_stream = stdin or sys.stdin
+    try:
+        is_tty = bool(in_stream.isatty() and out.isatty())
+    except Exception:
+        is_tty = False
+
+    should_prompt = interactive or (is_tty and not yes and template == "auto")
+    chosen_template = template
     sample_tasks = list(config.tasks.keys())[:2]
-    group_name = "stack" if "dev" in config.tasks else "dev"
+    default_group = "stack" if "dev" in config.tasks else "dev"
+    strict_ports = False
+    fail_fast = True
+
+    if should_prompt:
+        avail_templates = ", ".join(("auto", *tuple(_INIT_TEMPLATES.keys())))
+        chosen_template = _prompt_line(
+            out,
+            in_stream,
+            f"Template ({avail_templates}) [{template}]: ",
+            default=template,
+        )
+        if chosen_template not in ("auto", *_INIT_TEMPLATES):
+            out.write(
+                style(
+                    f"Unknown template '{chosen_template}'. Falling back to 'auto'.\n",
+                    YELLOW,
+                    enabled=use_color,
+                )
+            )
+            chosen_template = "auto"
+
+    if chosen_template in _INIT_TEMPLATES:
+        target_path.write_text(_INIT_TEMPLATES[chosen_template], encoding="utf-8")
+        out.write(
+            style(
+                f"Created {target_path} from '{chosen_template}' template.\n",
+                GREEN,
+                enabled=use_color,
+            )
+        )
+        return 0
+
+    if should_prompt:
+        default_group = _prompt_line(
+            out,
+            in_stream,
+            f"Primary group name [{default_group}]: ",
+            default=default_group,
+        )
+        strict_ans = _prompt_line(
+            out,
+            in_stream,
+            "Abort startup if any port is busy (strict_ports)? [y/N]: ",
+            default="n",
+        ).lower()
+        strict_ports = strict_ans in ("y", "yes")
+        ff_ans = _prompt_line(
+            out,
+            in_stream,
+            "Stop sibling services on crash (fail_fast)? [Y/n]: ",
+            default="y",
+        ).lower()
+        fail_fast = ff_ans not in ("n", "no")
+
     group_line = (
-        f"{group_name} = {json.dumps(sample_tasks)}"
+        f"{default_group} = {json.dumps(sample_tasks)}"
         if sample_tasks
-        else f'{group_name} = ["api", "web"]'
+        else f'{default_group} = ["api", "web"]'
     )
 
     lines = [
         "# devup.toml — project-specific service groups, dependencies, and overrides",
-        f"# default = {json.dumps([group_name])}" if sample_tasks else '# default = ["dev"]',
-        "fail_fast = true",
+        f"# default = {json.dumps([default_group])}" if sample_tasks else '# default = ["dev"]',
+        f"fail_fast = {'true' if fail_fast else 'false'}",
+        f"strict_ports = {'true' if strict_ports else 'false'}",
+        "auto_env = true",
         "shutdown_timeout = 5.0",
         "",
         "[groups]",
         group_line,
         "",
-        "# Example custom task with readiness detection:",
+        "# Example custom task with HTTP readiness detection:",
         "# [tasks.api]",
-        '# command = "uvicorn app.main:app --reload"',
+        '# command = "uvicorn app.main:app --reload --port 8000"',
         '# cwd = "backend"',
-        '# description = "Start API server"',
-        '# ready_pattern = "Uvicorn running on"',
+        "# port = 8000",
+        '# ready_url = "http://127.0.0.1:8000/health"',
         "",
     ]
     target_path.write_text("\n".join(lines), encoding="utf-8")
     out.write(style(f"Created {target_path}\n", GREEN, enabled=use_color))
     return 0
+
+
+def _print_validation(
+    root: Path,
+    scan_workspaces: bool,
+    out: TextIO,
+    use_color: bool,
+    as_json: bool,
+) -> int:
+    report = validate_workspace(root, scan_workspaces=scan_workspaces)
+    if as_json:
+        out.write(json.dumps(report.to_dict(redact_paths=False), indent=2) + "\n")
+        return 0 if report.valid else 1
+
+    for warn in report.warnings:
+        out.write(style(f"warning: {warn}\n", YELLOW, enabled=use_color))
+    for err in report.errors:
+        out.write(style(f"error: {err}\n", RED, enabled=use_color))
+
+    if report.valid:
+        out.write(
+            style(
+                f"Valid configuration ({report.task_count} task(s), {report.group_count} group(s)).\n",
+                GREEN,
+                enabled=use_color,
+            )
+        )
+        return 0
+    return 1
+
+
+def _print_doctor(
+    root: Path,
+    scan_workspaces: bool,
+    online: bool,
+    out: TextIO,
+    use_color: bool,
+    as_json: bool,
+) -> int:
+    report = run_doctor(root, online=online, scan_workspaces=scan_workspaces)
+    if as_json:
+        out.write(json.dumps(report, indent=2) + "\n")
+        return 0 if report["validation"]["valid"] else 1
+
+    out.write(style("devup doctor\n", BOLD, CYAN, enabled=use_color))
+    out.write(f"  devup version : {report['devup_version']}\n")
+    out.write(f"  python        : {report['python_version']} ({report['os']})\n")
+    out.write(f"  project root  : {report['cwd']}\n")
+    out.write(f"  devup.toml    : {'present' if report['devup_toml_present'] else 'absent'}\n")
+    out.write(f"  .env          : {'present' if report['dotenv_present'] else 'absent'}\n")
+    out.write(f"  sources       : {', '.join(report['sources']) or 'none'}\n")
+
+    available = [name for name, info in report["runners"].items() if info["available"]]
+    missing = [name for name, info in report["runners"].items() if not info["available"]]
+    out.write(f"  runners found : {', '.join(available) or 'none'}\n")
+    out.write(style(f"  not in PATH   : {', '.join(missing) or 'none'}\n", DIM, enabled=use_color))
+
+    val = report["validation"]
+    if val["errors"]:
+        for err in val["errors"]:
+            out.write(style(f"  error         : {err}\n", RED, enabled=use_color))
+    elif val["warnings"]:
+        for warn in val["warnings"]:
+            out.write(style(f"  warning       : {warn}\n", YELLOW, enabled=use_color))
+    else:
+        out.write(style("  validation    : OK\n", GREEN, enabled=use_color))
+
+    upd = report.get("update_check")
+    if isinstance(upd, dict):
+        if upd.get("update_available"):
+            out.write(
+                style(
+                    f"  update        : devup-cli {upd['latest']} available (current {upd['current']})\n",
+                    YELLOW,
+                    enabled=use_color,
+                )
+            )
+        else:
+            out.write(style(f"  update        : up to date ({upd['current']})\n", GREEN, enabled=use_color))
+
+    return 0 if val["valid"] else 1
+
+
+def _maybe_notify_update(
+    args: argparse.Namespace,
+    out: TextIO,
+    use_color: bool,
+    command: str | None,
+) -> None:
+    if args.no_update_check or args.json or command == "completion":
+        return
+    env_opt_in = os.environ.get("DEVUP_CHECK_UPDATES") in ("1", "true", "yes")
+    if not (args.check_updates or env_opt_in):
+        return
+    status = check_for_update(__version__, force=bool(args.check_updates))
+    if status and status.update_available:
+        out.write(
+            style(
+                f"Note: devup-cli {status.latest} is available (you have {status.current}). "
+                "Upgrade with `pipx upgrade devup-cli` or `pip install -U devup-cli`.\n",
+                DIM,
+                enabled=use_color,
+            )
+        )
 
 
 def _exit_code_from_results(results: list[TaskResult]) -> int:
@@ -276,11 +586,57 @@ def main(argv: Sequence[str] | None = None, stream: TextIO | None = None) -> int
     command = positionals[0] if positionals and positionals[0] in _SUBCOMMANDS else None
     rest = positionals[1:] if command else positionals
 
+    if command == "completion":
+        if len(rest) != 1:
+            out.write(
+                style(
+                    f"Usage: devup completion <{'|'.join(SUPPORTED_SHELLS)}>\n",
+                    RED,
+                    enabled=use_color,
+                )
+            )
+            return 2
+        try:
+            out.write(generate_completion(rest[0]))
+            return 0
+        except ValueError as exc:
+            out.write(style(f"Error: {exc}\n", RED, enabled=use_color))
+            return 2
+
+    if command == "validate":
+        return _print_validation(
+            root,
+            scan_workspaces=not args.no_workspaces,
+            out=out,
+            use_color=use_color,
+            as_json=args.json,
+        )
+
+    if command == "doctor":
+        return _print_doctor(
+            root,
+            scan_workspaces=not args.no_workspaces,
+            online=bool(args.online or args.check_updates),
+            out=out,
+            use_color=use_color,
+            as_json=args.json,
+        )
+
+    _maybe_notify_update(args, out, use_color, command)
+
     if command in ("list", "ls"):
         return _print_list(config, out, use_color, as_json=args.json)
 
     if command == "init":
-        return _init_devup_toml(config, force=args.force, out=out, use_color=use_color)
+        return _init_devup_toml(
+            config,
+            force=args.force,
+            out=out,
+            use_color=use_color,
+            template=args.template,
+            interactive=args.interactive,
+            yes=args.yes,
+        )
 
     if command == "pick":
         try:

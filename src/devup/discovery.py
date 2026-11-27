@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import re
@@ -892,8 +893,14 @@ def resolve_targets(config: WorkspaceConfig, targets: list[str]) -> list[str]:
             stack.remove(name)
             return
         if name not in config.tasks:
-            available = ", ".join(sorted(list(config.tasks.keys()) + list(config.groups.keys())))
-            raise KeyError(f"Unknown task or group '{name}'. Available: {available or 'none'}")
+            all_names = sorted(list(config.tasks.keys()) + list(config.groups.keys()))
+            suggestions = difflib.get_close_matches(name, all_names, n=3, cutoff=0.45)
+            hint = f" Did you mean: {', '.join(suggestions)}?" if suggestions else ""
+            available = ", ".join(all_names) if all_names else "none"
+            raise KeyError(
+                f"Unknown task or group '{name}'.{hint} "
+                f"Available: {available}. Run `devup list` to inspect discovered targets."
+            )
         if name not in seen:
             seen.add(name)
             expanded.append(name)

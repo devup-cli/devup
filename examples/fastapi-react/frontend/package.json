@@ -1,0 +1,8 @@
+{
+  "name": "react-web",
+  "private": true,
+  "scripts": {
+    "dev": "vite --port 5173",
+    "build": "vite build"
+  }
+}

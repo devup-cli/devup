@@ -1,0 +1,20 @@
+default = ["dev"]
+fail_fast = true
+strict_ports = true
+
+[groups]
+dev = ["infra", "api"]
+
+[tasks.infra]
+command = "docker compose up postgres"
+port = 5432
+ready_tcp = "127.0.0.1:5432"
+ready_timeout = 30
+
+[tasks.api]
+command = "mvn spring-boot:run"
+cwd = "service"
+port = 8080
+depends_on = ["infra"]
+ready_url = "http://127.0.0.1:8080/actuator/health"
+ready_timeout = 45

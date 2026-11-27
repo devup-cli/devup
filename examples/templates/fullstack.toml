@@ -1,0 +1,21 @@
+default = ["dev"]
+fail_fast = true
+strict_ports = false
+auto_env = true
+shutdown_timeout = 5.0
+
+[groups]
+dev = ["api", "web"]
+
+[tasks.api]
+command = "uvicorn app.main:app --reload --port 8000"
+cwd = "backend"
+port = 8000
+ready_url = "http://127.0.0.1:8000/health"
+watch = ["app/**/*.py"]
+
+[tasks.web]
+command = "npm run dev"
+cwd = "frontend"
+port = 5173
+depends_on = ["api"]

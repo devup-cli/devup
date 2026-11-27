@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-11-27
+
+### Added
+- **Documentation & Branding:** Added `assets/logo.svg`, PyPI download stats badge, static GitHub Pages documentation site (`docs/`), 5-minute getting-started tutorial, complete CLI & `devup.toml` references, and troubleshooting/FAQ docs.
+- **Examples & Onboarding:** Added `examples/` projects (`spring-boot-react`, `spring-boot-kafka-postgres`, `fastapi-react`, `node-monorepo`, `maven-multimodule`, `gradle-multimodule`, `docker-compose-multiservice`), reusable `devup.toml` templates (`examples/templates/`), and interactive/templated `devup init`.
+- **CLI Diagnostics & Ergonomics:** Added `devup validate`, `devup doctor` (with redacted `--json` diagnostic report), shell autocompletion (`devup completion <bash|zsh|fish|powershell>`), `difflib` command typo suggestions, and opt-in cached PyPI update notifications (`--check-updates`).
+- **Distribution & Release Automation:** Added Homebrew formula (`packaging/homebrew/devup-cli.rb`), Scoop manifest (`packaging/scoop/devup.json`), single-file `devup.pyz` zipapp builder (`scripts/build_zipapp.py`), standalone executable evaluation, `scripts/bump_version.py`, `.github/release.yml`, and post-publication PyPI installation smoke tests in `publish.yml`.
+- **Open-Source Community:** Added `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, `SECURITY.md`, `ROADMAP.md`, and GitHub issue/PR templates.
+
 ## [0.2.0] - 2026-11-27
 
 ### Added

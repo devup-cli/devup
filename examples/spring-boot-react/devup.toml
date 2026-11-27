@@ -1,0 +1,19 @@
+default = ["dev"]
+fail_fast = true
+workspaces = ["backend", "frontend"]
+
+[groups]
+dev = ["api", "web"]
+
+[tasks.api]
+command = "mvn spring-boot:run"
+cwd = "backend"
+port = 8080
+ready_url = "http://127.0.0.1:8080/actuator/health"
+ready_timeout = 45
+
+[tasks.web]
+command = "npm run dev"
+cwd = "frontend"
+port = 5173
+depends_on = ["api"]

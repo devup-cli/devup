@@ -1,0 +1,17 @@
+{
+  "version": "0.3.0",
+  "description": "Polyglot project script discovery and multi-service parallel runner.",
+  "homepage": "https://devup-cli.github.io/devup/",
+  "license": "MIT",
+  "url": "https://github.com/devup-cli/devup/releases/download/v0.3.0/devup.pyz",
+  "bin": "devup.cmd",
+  "pre_install": [
+    "Set-Content -Path \"$dir\\devup.cmd\" -Value '@echo off\r\npython \"%~dp0devup.pyz\" %*' -Encoding Ascii"
+  ],
+  "checkver": {
+    "github": "https://github.com/devup-cli/devup"
+  },
+  "autoupdate": {
+    "url": "https://github.com/devup-cli/devup/releases/download/v$version/devup.pyz"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "name": "@demo/api",
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "test": "vitest run"
+  }
+}

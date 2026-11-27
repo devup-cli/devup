@@ -1,0 +1,21 @@
+default = ["stack"]
+fail_fast = true
+
+[groups]
+stack = ["db", "cache", "app"]
+
+[tasks.db]
+command = "docker compose up postgres"
+port = 5432
+ready_tcp = "127.0.0.1:5432"
+
+[tasks.cache]
+command = "docker compose up redis"
+port = 6379
+ready_tcp = "127.0.0.1:6379"
+
+[tasks.app]
+command = "docker compose up app"
+port = 8000
+depends_on = ["db", "cache"]
+ready_url = "http://127.0.0.1:8000/health"

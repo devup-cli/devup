@@ -1,0 +1,19 @@
+name: Feature Request
+description: Suggest a new manifest scanner, CLI flag, or improvement
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem or use case
+      description: What workflow friction does this solve?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Example CLI flags or devup.toml configuration.
+    validations:
+      required: true

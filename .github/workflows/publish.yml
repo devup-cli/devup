@@ -30,11 +30,20 @@ jobs:
       - name: Validate package metadata
         run: python -m twine check dist/*
 
+      - name: Build zipapp artifact
+        run: python scripts/build_zipapp.py --output dist-zipapp/devup.pyz
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: dist
           path: dist/
+
+      - name: Upload zipapp artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: zipapp
+          path: dist-zipapp/devup.pyz
 
   publish-pypi:
     name: Publish to PyPI
@@ -54,3 +63,60 @@ jobs:
 
       - name: Publish package to PyPI via Trusted Publishing
         uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/
+          skip-existing: false
+
+  attach-zipapp:
+    name: Attach zipapp to GitHub Release
+    if: github.event_name == 'release'
+    needs: [build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download zipapp artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: zipapp
+          path: dist-zipapp/
+
+      - name: Upload devup.pyz to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.ref_name }}" dist-zipapp/devup.pyz --clobber
+
+  verify-pypi:
+    name: Post-publication PyPI smoke test
+    needs: [publish-pypi]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install devup-cli from PyPI and smoke test
+        shell: python
+        run: |
+          import json, os, subprocess, sys, tempfile, time
+          from pathlib import Path
+          tag = os.environ.get("GITHUB_REF_NAME", "")
+          spec = f"devup-cli=={tag.lstrip('v')}" if tag.startswith("v") else "devup-cli"
+          with tempfile.TemporaryDirectory() as td:
+              venv = Path(td) / "venv"
+              subprocess.check_call([sys.executable, "-m", "venv", str(venv)])
+              vpy = venv / "bin" / "python"
+              vdev = venv / "bin" / "devup"
+              installed = False
+              for attempt in range(8):
+                  rc = subprocess.call([str(vpy), "-m", "pip", "install", "--no-cache-dir", spec])
+                  if rc == 0:
+                      installed = True
+                      break
+                  time.sleep(10)
+              assert installed, f"Failed to install {spec} from PyPI"
+              out_ver = subprocess.check_output([str(vdev), "--version"], text=True).strip()
+              print("Installed:", out_ver)
+              doc = subprocess.check_output([str(vdev), "doctor", "--json"], text=True)
+              assert "devup_version" in json.loads(doc)

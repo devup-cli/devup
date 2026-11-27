@@ -1,0 +1,6 @@
+default = ["dev"]
+fail_fast = true
+
+[groups]
+dev = ["api:dev"]
+verify = ["common:test", "api:test"]

@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>devup — Polyglot Script Discovery &amp; Parallel Service Runner</title>
+  <meta name="description" content="Zero-dependency CLI to discover scripts across package.json, pyproject.toml, pom.xml, build.gradle, Makefile, Justfile, and Docker Compose and run them in parallel." />
+  <link rel="icon" type="image/svg+xml" href="assets/logo.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hero">
+    <nav class="nav container">
+      <a class="brand" href="#top">
+        <img src="assets/logo.svg" alt="devup logo" width="32" height="32" />
+        <span>devup</span>
+      </a>
+      <div class="nav-links">
+        <a href="#getting-started">Getting Started</a>
+        <a href="#cli">CLI Reference</a>
+        <a href="#config">devup.toml</a>
+        <a href="#troubleshooting">FAQ</a>
+        <a href="https://github.com/devup-cli/devup" target="_blank" rel="noopener">GitHub</a>
+        <a href="https://pypi.org/project/devup-cli/" target="_blank" rel="noopener">PyPI</a>
+      </div>
+    </nav>
+
+    <div id="top" class="hero-body container">
+      <img class="hero-logo" src="assets/logo.svg" alt="devup logo" width="76" height="76" />
+      <h1>One command for every stack in your repo.</h1>
+      <p class="subtitle">
+        Zero-dependency Python CLI that auto-discovers scripts across
+        <code>package.json</code>, <code>pyproject.toml</code>, <code>pom.xml</code>,
+        <code>build.gradle</code>, <code>Justfile</code>, <code>Makefile</code>, and
+        <code>docker-compose.yml</code>, then runs services in parallel with colored logs,
+        HTTP/TCP readiness probes, <code>.env</code> loading, and clean <code>Ctrl+C</code> shutdown.
+      </p>
+      <div class="cta-row">
+        <code class="install-box">uvx --from devup-cli devup list</code>
+        <code class="install-box">pipx install devup-cli</code>
+      </div>
+      <div class="demo-wrap">
+        <img src="assets/demo.gif" alt="devup terminal demo" />
+      </div>
+    </div>
+  </header>
+
+  <main class="container content">
+    <section id="getting-started">
+      <h2>5-Minute Getting Started</h2>
+      <ol>
+        <li><strong>Try without installing:</strong> <code>uvx --from devup-cli devup list</code> (or install globally via <code>pipx install devup-cli</code>).</li>
+        <li><strong>Discover tasks:</strong> Run <code>devup list</code> in any project directory to see scripts from Node, Python, Maven, Gradle, Make, Just, and Compose.</li>
+        <li><strong>Run in parallel:</strong> Run <code>devup api web</code> or use <code>devup pick</code> for an interactive arrow-key selector.</li>
+        <li><strong>Customize when needed:</strong> Run <code>devup init</code> to scaffold <code>devup.toml</code> with groups, <code>depends_on</code>, <code>ready_url</code> / <code>ready_tcp</code>, <code>.env</code> files, and <code>watch</code> rules.</li>
+        <li><strong>Validate &amp; diagnose:</strong> Run <code>devup validate</code> and <code>devup doctor</code> to check configuration and installed runners.</li>
+      </ol>
+    </section>
+
+    <section id="cli">
+      <h2>CLI Command Reference</h2>
+      <table>
+        <thead>
+          <tr><th>Command</th><th>Description</th></tr>
+        </thead>
+        <tbody>
+          <tr><td><code>devup list [--json]</code></td><td>List all discovered groups and tasks across manifests.</td></tr>
+          <tr><td><code>devup run &lt;targets...&gt;</code></td><td>Run tasks or groups concurrently with colored <code>[service]</code> prefixes (shorthand: <code>devup a b</code>).</td></tr>
+          <tr><td><code>devup pick</code></td><td>Interactive arrow-key multi-select menu (numbered fallback in non-TTY).</td></tr>
+          <tr><td><code>devup init [--template ...]</code></td><td>Create a starter <code>devup.toml</code> interactively or from a preset template.</td></tr>
+          <tr><td><code>devup validate [--json]</code></td><td>Validate <code>devup.toml</code> syntax, dependencies, readiness URLs, paths, and ports.</td></tr>
+          <tr><td><code>devup doctor [--json] [--online]</code></td><td>Inspect local runners and emit a redacted shareable diagnostic report.</td></tr>
+          <tr><td><code>devup completion &lt;shell&gt;</code></td><td>Generate autocompletion scripts for <code>bash</code>, <code>zsh</code>, <code>fish</code>, or <code>powershell</code>.</td></tr>
+        </tbody>
+      </table>
+      <p>Useful global flags: <code>-C/--cwd</code>, <code>-w/--watch</code>, <code>--env-file</code>, <code>--no-dotenv</code>, <code>--strict-ports</code>, <code>--no-port-check</code>, <code>--keep-going</code>, <code>--dry-run</code>, <code>-t/--timestamps</code>, <code>--check-updates</code>.</p>
+    </section>
+
+    <section id="config">
+      <h2><code>devup.toml</code> Reference</h2>
+      <pre><code>default = ["dev"]
+fail_fast = true
+strict_ports = false
+auto_env = true
+env_file = [".env", ".env.local"]
+shutdown_timeout = 5.0
+
+[groups]
+dev = ["db", "api", "web"]
+
+[tasks.db]
+command = "docker compose up postgres"
+port = 5432
+ready_tcp = "127.0.0.1:5432"
+ready_timeout = 30
+
+[tasks.api]
+command = "uvicorn app.main:app --reload --port 8000"
+cwd = "backend"
+port = 8000
+env_file = ".env.api"
+depends_on = ["db"]
+ready_url = "http://127.0.0.1:8000/health"
+watch = ["app/**/*.py"]
+
+[tasks.web]
+command = "npm run dev"
+cwd = "frontend"
+port = 5173
+depends_on = ["api"]</code></pre>
+    </section>
+
+    <section id="troubleshooting">
+      <h2>Troubleshooting &amp; FAQ</h2>
+      <dl>
+        <dt>How does <code>devup</code> avoid orphan processes on Windows and Unix?</dt>
+        <dd>Windows tasks are attached to kill-on-close Job Objects with Toolhelp32 descendant tracking and <code>taskkill /F /T</code> fallback; POSIX tasks run in their own process session and are swept via <code>os.killpg</code>.</dd>
+        <dt>Does <code>devup</code> install any third-party dependencies?</dt>
+        <dd>No. <code>devup-cli</code> runs strictly on the Python 3.11+ standard library.</dd>
+        <dt>Why is the PyPI package named <code>devup-cli</code>?</dt>
+        <dd>The bare <code>devup</code> name on PyPI was already taken by another package; installing <code>devup-cli</code> provides the <code>devup</code> command.</dd>
+      </dl>
+    </section>
+  </main>
+
+  <footer class="footer container">
+    <p>MIT Licensed · <a href="https://github.com/devup-cli/devup">github.com/devup-cli/devup</a> · <a href="https://pypi.org/project/devup-cli/">pypi.org/project/devup-cli</a></p>
+  </footer>
+</body>
+</html>
