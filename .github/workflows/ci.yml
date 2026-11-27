@@ -66,8 +66,12 @@ jobs:
       - name: Verify pip, pipx, and uvx installs
         run: |
           python -m pip install --upgrade pip pipx uv
+          python -m pip install .
+          devup --version
+          python -m pip uninstall -y devup-cli
           pipx install .
-          ~/.local/bin/devup --version
+          PIPX_BIN="$(pipx environment --value PIPX_BIN_DIR)"
+          "$PIPX_BIN/devup" --version
           pipx uninstall devup-cli
           uvx --from . devup --version
           uvx --from . devup doctor --json > /dev/null
@@ -80,11 +84,13 @@ jobs:
       - name: Install, test, and uninstall Homebrew formula
         env:
           HOMEBREW_NO_AUTO_UPDATE: "1"
-          HOMEBREW_NO_INSTALL_FROM_API: "1"
         run: |
-          brew install --formula ./packaging/homebrew/devup-cli.rb
-          devup --version
-          brew test ./packaging/homebrew/devup-cli.rb
+          TAP_DIR="$(brew --repository)/Library/Taps/devup-cli/homebrew-tap"
+          mkdir -p "$TAP_DIR/Formula"
+          cp packaging/homebrew/devup-cli.rb "$TAP_DIR/Formula/devup-cli.rb"
+          brew install --build-from-source devup-cli/tap/devup-cli
+          "$(brew --prefix)/bin/devup" --version
+          brew test devup-cli/tap/devup-cli
           brew uninstall devup-cli
 
   packaging-scoop:
@@ -100,7 +106,8 @@ jobs:
           }
           $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
           scoop bucket add main
-          scoop install ./packaging/scoop/devup.json
+          $manifest = (Resolve-Path packaging\scoop\devup.json).Path
+          scoop install $manifest
           & "$env:USERPROFILE\scoop\shims\devup.cmd" --version
           & "$env:USERPROFILE\scoop\shims\devup.cmd" doctor --json | Out-Null
           scoop uninstall devup
