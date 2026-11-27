@@ -1,12 +1,34 @@
 # devup
 
 [![CI](https://github.com/devup-cli/devup/actions/workflows/ci.yml/badge.svg)](https://github.com/devup-cli/devup/actions/workflows/ci.yml)
+[![PyPI](https://img.shields.io/pypi/v/devup-cli)](https://pypi.org/project/devup-cli/)
+[![Python](https://img.shields.io/pypi/pyversions/devup-cli)](https://pypi.org/project/devup-cli/)
+[![License](https://img.shields.io/github/license/devup-cli/devup)](LICENSE)
 
-**Polyglot project script discovery and multi-service parallel runner.**
+**Zero-dependency polyglot script discovery and multi-service parallel runner.**
 
 `devup` scans your repository for runnable scripts and services across `devup.toml`, `package.json`, `pyproject.toml`, `pom.xml` (Maven), `build.gradle(.kts)` (Gradle), `Justfile`, `Makefile`, and `docker-compose.yml`, then runs one or many of them concurrently with color-coded prefixed logs and clean process-tree shutdown on `Ctrl+C`.
 
+Try it in 5 seconds with no permanent install:
+
+```bash
+uvx --from devup-cli devup list
+```
+
+![devup terminal demo](assets/demo.gif)
+
 Zero third-party runtime dependencies — pure Python 3.11+ standard library.
+
+## Why `devup`?
+
+| Feature | `devup` | `concurrently` | `honcho` | `mprocs` | `just` |
+| :--- | :---: | :---: | :---: | :---: | :---: |
+| Zero-config polyglot discovery (`package.json`, `pyproject.toml`, `pom.xml`, `build.gradle`, `Makefile`, `Justfile`, Compose) | Yes | — | — | — | — |
+| Parallel execution + colored `[service]` logs | Yes | Yes | Yes | TUI | — |
+| HTTP (`ready_url`) & TCP (`ready_tcp`) startup readiness | Yes | — | — | — | — |
+| Built-in `.env` loading & port conflict pre-check | Yes | — | `.env` only | — | `.env` only |
+| Interactive multi-select picker (`devup pick`) & `--watch` | Yes | — | — | TUI | — |
+| Zero external runtime dependencies | Yes (Python 3.11+) | Needs Node | Yes | Native binary | Native binary |
 
 ## Features
 
@@ -40,7 +62,10 @@ Zero third-party runtime dependencies — pure Python 3.11+ standard library.
 ## Installation
 
 ```bash
-# With pipx or uv (recommended for global CLI usage)
+# Run once without installing (via uv)
+uvx --from devup-cli devup --help
+
+# Install globally with pipx or uv (recommended)
 pipx install devup-cli
 # or
 uv tool install devup-cli
