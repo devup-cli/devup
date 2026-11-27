@@ -1,5 +1,7 @@
 # devup
 
+[![CI](https://github.com/devup-cli/devup/actions/workflows/ci.yml/badge.svg)](https://github.com/devup-cli/devup/actions/workflows/ci.yml)
+
 **Polyglot project script discovery and multi-service parallel runner.**
 
 `devup` scans your repository for runnable scripts and services across `devup.toml`, `package.json`, `pyproject.toml`, `Justfile`, `Makefile`, and `docker-compose.yml`, then runs one or many of them concurrently with color-coded prefixed logs and clean process-tree shutdown on `Ctrl+C`.
@@ -37,9 +39,12 @@ Zero third-party runtime dependencies — pure Python 3.11+ standard library.
 
 ```bash
 # With pipx or uv (recommended for global CLI usage)
-pipx install git+https://github.com/devup-cli/devup.git
+pipx install devup-cli
 # or
-uv tool install git+https://github.com/devup-cli/devup.git
+uv tool install devup-cli
+
+# Or directly from GitHub
+pipx install git+https://github.com/devup-cli/devup.git
 
 # Or install locally from a cloned checkout
 pip install -e .
