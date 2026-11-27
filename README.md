@@ -4,7 +4,7 @@
 
 **Polyglot project script discovery and multi-service parallel runner.**
 
-`devup` scans your repository for runnable scripts and services across `devup.toml`, `package.json`, `pyproject.toml`, `Justfile`, `Makefile`, and `docker-compose.yml`, then runs one or many of them concurrently with color-coded prefixed logs and clean process-tree shutdown on `Ctrl+C`.
+`devup` scans your repository for runnable scripts and services across `devup.toml`, `package.json`, `pyproject.toml`, `pom.xml` (Maven), `build.gradle(.kts)` (Gradle), `Justfile`, `Makefile`, and `docker-compose.yml`, then runs one or many of them concurrently with color-coded prefixed logs and clean process-tree shutdown on `Ctrl+C`.
 
 Zero third-party runtime dependencies — pure Python 3.11+ standard library.
 

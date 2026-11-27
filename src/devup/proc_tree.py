@@ -6,7 +6,7 @@ import os
 import signal
 import subprocess
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(slots=True)
@@ -16,6 +16,13 @@ class ManagedProcess:
     proc: subprocess.Popen[str]
     pgid: int
     job_handle: int | None = None
+    job_terminated: bool = False
+    known_descendants: set[int] = field(default_factory=set)
+
+    def refresh_descendants(self) -> None:
+        """Record current Windows descendant PIDs when Job Object tracking is unavailable."""
+        if os.name == "nt" and self.job_handle is None and not self.job_terminated:
+            self.known_descendants.update(_snapshot_windows_descendants(self.proc.pid))
 
     def close(self) -> None:
         """Release OS handles associated with this managed process."""
@@ -136,6 +143,101 @@ def _close_windows_job(job_handle: int) -> None:
         pass
 
 
+def _snapshot_windows_descendants(root_pid: int) -> list[int]:
+    """Return all live Windows descendant PIDs rooted at root_pid via Toolhelp32."""
+    if os.name != "nt":
+        return []
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        th32cs_snapprocess = 0x00000002
+        max_path = 260
+
+        class PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", wintypes.DWORD),
+                ("cntUsage", wintypes.DWORD),
+                ("th32ProcessID", wintypes.DWORD),
+                ("th32DefaultHeapID", ctypes.c_size_t),
+                ("th32ModuleID", wintypes.DWORD),
+                ("cntThreads", wintypes.DWORD),
+                ("th32ParentProcessID", wintypes.DWORD),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", wintypes.DWORD),
+                ("szExeFile", wintypes.WCHAR * max_path),
+            ]
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.Process32FirstW.restype = wintypes.BOOL
+        kernel32.Process32FirstW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.Process32NextW.restype = wintypes.BOOL
+        kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(PROCESSENTRY32W)]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        snap = kernel32.CreateToolhelp32Snapshot(th32cs_snapprocess, 0)
+        invalid_handle = wintypes.HANDLE(-1).value
+        if not snap or snap == invalid_handle:
+            return []
+
+        children_by_parent: dict[int, list[int]] = {}
+        try:
+            entry = PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(PROCESSENTRY32W)
+            ok = kernel32.Process32FirstW(snap, ctypes.byref(entry))
+            while ok:
+                children_by_parent.setdefault(int(entry.th32ParentProcessID), []).append(
+                    int(entry.th32ProcessID)
+                )
+                ok = kernel32.Process32NextW(snap, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snap)
+
+        descendants: list[int] = []
+        queue = list(children_by_parent.get(root_pid, ()))
+        seen: set[int] = {root_pid}
+        while queue:
+            pid = queue.pop(0)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            descendants.append(pid)
+            queue.extend(children_by_parent.get(pid, ()))
+        return descendants
+    except Exception:
+        return []
+
+
+def _terminate_windows_pid(pid: int) -> None:
+    """Terminate an individual Windows process by PID if still running."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        process_terminate = 0x0001
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.TerminateProcess.restype = wintypes.BOOL
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+        handle = kernel32.OpenProcess(process_terminate, False, pid)
+        if handle:
+            try:
+                kernel32.TerminateProcess(handle, 1)
+            finally:
+                kernel32.CloseHandle(handle)
+    except Exception:
+        pass
+
+
 def spawn_managed_process(
     command: str,
     cwd: str,
@@ -173,6 +275,16 @@ def terminate_managed_process(
     proc = managed.proc
 
     if os.name == "nt":
+        if managed.job_terminated:
+            try:
+                proc.wait(timeout=1)
+            except subprocess.TimeoutExpired:
+                pass
+            return
+
+        # Snapshot descendants before signaling so orphaned grandchildren are still known
+        # if Job Object tracking failed and the parent exits on CTRL_BREAK_EVENT.
+        managed.refresh_descendants()
         if not force_immediately and proc.poll() is None:
             try:
                 proc.send_signal(signal.CTRL_BREAK_EVENT)
@@ -184,22 +296,27 @@ def terminate_managed_process(
                     break
                 time.sleep(0.05)
 
-        # Always sweep the full tree via Job Object or taskkill even if cmd.exe exited early.
+        # Always sweep the full tree via Job Object or descendant/taskkill fallback even if parent exited early.
         if managed.job_handle is not None:
             _terminate_windows_job(managed.job_handle)
+            managed.job_terminated = True
             managed.close()
+        else:
+            managed.refresh_descendants()
+            for child_pid in sorted(managed.known_descendants, reverse=True):
+                _terminate_windows_pid(child_pid)
+            if proc.poll() is None:
+                try:
+                    subprocess.run(
+                        ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=2,
+                        check=False,
+                    )
+                except (OSError, subprocess.SubprocessError):
+                    pass
 
-        if proc.poll() is None:
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-            except OSError:
-                pass
         if proc.poll() is None:
             try:
                 proc.kill()

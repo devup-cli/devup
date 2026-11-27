@@ -469,8 +469,12 @@ def run_tasks(
 
             restart_requested = False
             next_watch_poll = time.monotonic() + opts.watch_interval
+            next_desc_poll = time.monotonic() + 0.15
 
             while proc.poll() is None:
+                if os.name == "nt" and managed.job_handle is None and time.monotonic() >= next_desc_poll:
+                    next_desc_poll = time.monotonic() + 0.2
+                    managed.refresh_descendants()
                 if stop_event.is_set():
                     terminate_managed_process(
                         managed,
@@ -506,6 +510,13 @@ def run_tasks(
 
             with procs_lock:
                 active_procs.pop(name, None)
+            if stop_event.is_set():
+                # Ensure any descendants tracked before an early parent exit are also terminated.
+                terminate_managed_process(
+                    managed,
+                    timeout=shutdown_timeout,
+                    force_immediately=force_kill_event.is_set(),
+                )
             managed.close()
 
             exit_code = proc.returncode if proc.returncode is not None else 1

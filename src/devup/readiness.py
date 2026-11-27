@@ -86,7 +86,6 @@ def probe_http(url: str, timeout: float = 0.5) -> bool:
     try:
         conn.request("GET", path, headers={"User-Agent": "devup-readiness/1.0", "Connection": "close"})
         resp = conn.getresponse()
-        resp.read()
         return 200 <= resp.status < 400
     except (OSError, http.client.HTTPException, ValueError):
         return False

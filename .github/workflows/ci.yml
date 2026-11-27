@@ -36,3 +36,15 @@ jobs:
 
       - name: Verify devup help output
         run: devup --help
+
+      - name: Smoke-test installed CLI on sample project
+        shell: python
+        run: |
+          import json, subprocess, tempfile
+          from pathlib import Path
+          with tempfile.TemporaryDirectory() as tmp:
+              p = Path(tmp)
+              (p / "package.json").write_text(json.dumps({"scripts": {"test": "echo ok"}}))
+              out = subprocess.check_output(["devup", "-C", tmp, "list", "--json"], text=True)
+              assert "test" in json.loads(out)["tasks"]
+              subprocess.check_call(["devup", "-C", tmp, "--dry-run", "test"])

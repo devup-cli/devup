@@ -5,10 +5,12 @@ from __future__ import annotations
 import io
 import json
 import os
+import signal
 import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -19,8 +21,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from devup.discovery import discover_workspace
 from devup.models import Task, WorkspaceConfig
 from devup.ports import _lookup_posix_owner
-from devup.proc_tree import ManagedProcess, terminate_managed_process
-from devup.readiness import normalize_tcp_target, parse_tcp_target, validate_ready_url
+from devup.proc_tree import ManagedProcess, spawn_managed_process, terminate_managed_process
+from devup.readiness import (
+    normalize_tcp_target,
+    parse_tcp_target,
+    probe_http,
+    validate_ready_url,
+)
 from devup.runner import RunOptions, run_tasks
 
 
@@ -317,6 +324,61 @@ class ReadinessProbeTests(unittest.TestCase):
             self.assertIn("readiness check timed out", buf.getvalue())
             self.assertNotIn("NEVER", buf.getvalue())
 
+    def test_http_readiness_handles_streaming_body_without_blocking(self) -> None:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe_sock:
+            probe_sock.bind(("127.0.0.1", 0))
+            port = probe_sock.getsockname()[1]
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            srv_script = root / "stream_srv.py"
+            srv_script.write_text(
+                "import http.server, socketserver, threading, time\n"
+                "done = threading.Event()\n"
+                "class FastHTTPServer(http.server.HTTPServer):\n"
+                "    def server_bind(self):\n"
+                "        socketserver.TCPServer.server_bind(self)\n"
+                "        self.server_name = '127.0.0.1'\n"
+                "        self.server_port = self.server_address[1]\n"
+                "class H(http.server.BaseHTTPRequestHandler):\n"
+                "    def do_GET(self):\n"
+                "        self.send_response(200)\n"
+                "        self.send_header('Content-Type', 'text/event-stream')\n"
+                "        self.end_headers()\n"
+                "        try:\n"
+                "            self.wfile.write(b'data: open\\n\\n')\n"
+                "            self.wfile.flush()\n"
+                "            done.wait(timeout=8.0)\n"
+                "        except OSError:\n"
+                "            pass\n"
+                "    def log_message(self, *args):\n"
+                "        pass\n"
+                f"srv = FastHTTPServer(('127.0.0.1', {port}), H)\n"
+                "threading.Thread(target=srv.serve_forever, daemon=True).start()\n"
+                "print('STREAM_LISTENING', flush=True)\n"
+                "done.wait(timeout=8.0)\n",
+                encoding="utf-8",
+            )
+            url = f"http://127.0.0.1:{port}/events"
+            proc = subprocess.Popen(
+                [sys.executable, str(srv_script)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            try:
+                assert proc.stdout is not None
+                line = proc.stdout.readline()
+                self.assertIn("STREAM_LISTENING", line)
+                t0 = time.monotonic()
+                self.assertTrue(probe_http(url, timeout=0.5))
+                self.assertLess(time.monotonic() - t0, 1.5)
+            finally:
+                proc.kill()
+                proc.wait(timeout=2)
+                if proc.stdout is not None:
+                    proc.stdout.close()
+
 
 class ProcessCleanupAndCrossPlatformTests(unittest.TestCase):
     def test_grandchild_process_tree_is_killed_on_fail_fast(self) -> None:
@@ -409,6 +471,88 @@ class ProcessCleanupAndCrossPlatformTests(unittest.TestCase):
         )
         with mock.patch("devup.ports.subprocess.run", side_effect=[OSError("no lsof"), ss_res]):
             self.assertEqual(_lookup_posix_owner(5173), "PID 3210 (node)")
+
+    @unittest.skipUnless(os.name == "nt", "Windows fallback process cleanup regression test")
+    def test_windows_cleanup_when_job_object_fails_and_parent_exits_early(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            pid_file = root / "orphan.pid"
+            spawner = root / "early_parent.py"
+            spawner.write_text(
+                "import subprocess, sys, time\n"
+                "from pathlib import Path\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])\n"
+                f"Path({json.dumps(str(pid_file))}).write_text(str(child.pid), encoding='utf-8')\n"
+                "print('ORPHAN_SPAWNED', flush=True)\n"
+                "time.sleep(0.3)\n",
+                encoding="utf-8",
+            )
+            with mock.patch("devup.proc_tree._create_windows_job_for_process", return_value=None):
+                managed = spawn_managed_process(
+                    f'"{sys.executable}" "{spawner}"',
+                    cwd=str(root),
+                    env=os.environ.copy(),
+                )
+            self.assertIsNone(managed.job_handle)
+            deadline = time.monotonic() + 3.0
+            while not pid_file.is_file() and time.monotonic() < deadline:
+                time.sleep(0.05)
+            self.assertTrue(pid_file.is_file())
+            managed.refresh_descendants()
+            orphan_pid = int(pid_file.read_text(encoding="utf-8").strip())
+            self.assertIn(orphan_pid, managed.known_descendants)
+            # Wait for the parent to exit early before terminate_managed_process runs.
+            managed.proc.wait(timeout=3.0)
+            self.assertTrue(_is_pid_alive(orphan_pid))
+
+            terminate_managed_process(managed, timeout=0.5, force_immediately=False)
+            kill_deadline = time.monotonic() + 2.0
+            while _is_pid_alive(orphan_pid) and time.monotonic() < kill_deadline:
+                time.sleep(0.05)
+            self.assertFalse(
+                _is_pid_alive(orphan_pid),
+                f"Orphan PID {orphan_pid} survived fallback cleanup after early parent exit",
+            )
+            if managed.proc.stdout is not None:
+                managed.proc.stdout.close()
+
+    def test_sigint_handler_stops_running_services_cleanly(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            cfg = WorkspaceConfig(
+                root=root,
+                shutdown_timeout=0.5,
+                tasks={
+                    "worker": Task(
+                        name="worker",
+                        command=f'"{sys.executable}" -c "import time; print(\'STARTED\', flush=True); time.sleep(15)"',
+                        source="devup.toml",
+                        cwd=root,
+                    )
+                },
+            )
+            buf = io.StringIO()
+
+            def send_sigint() -> None:
+                deadline = time.monotonic() + 3.0
+                while "STARTED" not in buf.getvalue() and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                signal.raise_signal(signal.SIGINT)
+
+            t0 = time.monotonic()
+            trigger = threading.Thread(target=send_sigint, daemon=True)
+            trigger.start()
+            results = run_tasks(
+                cfg,
+                ["worker"],
+                options=RunOptions(color=False, port_check=False),
+                stream=buf,
+            )
+            trigger.join(timeout=2.0)
+            elapsed = time.monotonic() - t0
+            self.assertLess(elapsed, 5.0)
+            self.assertEqual([r.status for r in results], ["stopped"], msg=buf.getvalue())
+            self.assertIn("Interrupted:", buf.getvalue())
 
 
 if __name__ == "__main__":
