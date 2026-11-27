@@ -20,30 +20,31 @@ NPM_BIN = REPO_ROOT / "packages" / "npm" / "bin" / "devup.js"
 HAS_NODE = shutil.which("node") is not None
 
 
+def _run_with_timeout(cmd: list[str], cwd: Path | None, env: dict[str, str] | None) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            cmd,
+            cwd=str(cwd or REPO_ROOT),
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=25,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        out = exc.stdout.decode("utf-8", "replace") if isinstance(exc.stdout, bytes) else (exc.stdout or "")
+        err = exc.stderr.decode("utf-8", "replace") if isinstance(exc.stderr, bytes) else (exc.stderr or "")
+        raise AssertionError(f"Command {cmd} timed out after 25s.\nSTDOUT:\n{out}\nSTDERR:\n{err}") from exc
+
+
 def _run_node_cli(args: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        ["node", str(NPM_BIN), *args],
-        cwd=str(cwd or REPO_ROOT),
-        env=env,
-        capture_output=True,
-        text=True,
-        timeout=25,
-        check=False,
-    )
+    return _run_with_timeout(["node", str(NPM_BIN), *args], cwd, env)
 
 
 def _run_py_cli(args: list[str], cwd: Path | None = None, env: dict[str, str] | None = None) -> subprocess.CompletedProcess[str]:
     merged_env = dict(os.environ if env is None else env)
     merged_env["PYTHONPATH"] = str(REPO_ROOT / "src")
-    return subprocess.run(
-        [sys.executable, "-m", "devup", *args],
-        cwd=str(cwd or REPO_ROOT),
-        env=merged_env,
-        capture_output=True,
-        text=True,
-        timeout=25,
-        check=False,
-    )
+    return _run_with_timeout([sys.executable, "-m", "devup", *args], cwd, merged_env)
 
 
 def _port_free(port: int) -> bool:
@@ -121,7 +122,7 @@ class NpmParityAndConflictsTests(unittest.TestCase):
                 # so any readiness timeout exits promptly instead of spinning in watch mode.
                 api_cmd = f'"{sys.executable}" main.py'
                 base_toml = base_toml.replace('command = "python main.py"', f"command = {json.dumps(api_cmd)}")
-                base_toml = base_toml.replace('watch = ["*.py"]', "watch = false")
+                base_toml = base_toml.replace('watch = ["*.py"]', "watch = false\nready_timeout = 10")
                 (work / "devup.toml").write_text(
                     base_toml
                     + f'\n[tasks.check]\ncommand = {json.dumps(probe_cmd)}\ndepends_on = ["api"]\n',

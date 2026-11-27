@@ -171,12 +171,23 @@ watch = ["*.txt"]
       ac.signal
     );
 
-    setTimeout(() => {
+    const waitFor = async (predicate, timeoutMs = 8000) => {
+      const deadline = Date.now() + timeoutMs;
+      while (!predicate() && Date.now() < deadline) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      return predicate();
+    };
+
+    try {
+      const sawFirst = await waitFor(() => out.text().split("BOOT").length - 1 >= 1);
+      assert.equal(sawFirst, true, `expected first BOOT, got:\n${out.text()}`);
       writeFileSync(join(root, "app.txt"), "two", "utf8");
-    }, 350);
-    setTimeout(() => {
+      const sawSecond = await waitFor(() => out.text().split("BOOT").length - 1 >= 2);
+      assert.equal(sawSecond, true, `expected second BOOT, got:\n${out.text()}`);
+    } finally {
       ac.abort();
-    }, 1400);
+    }
 
     const results = await runPromise;
     assert.equal(results.length, 1);
