@@ -36,3 +36,12 @@ Yes. It automatically scans `package.json` `workspaces`, Maven `<modules>`, Grad
 
 **How do I prevent `.env` from overriding my shell variables?**  
 By default, root `.env` and workspace `env_file` entries never overwrite variables already exported in your shell.
+
+**Is `devup doctor --json` safe to paste into a public GitHub issue?**  
+Yes. `devup doctor --json` never prints `.env` values (only key names), redacts user home directories and OS usernames (`~` / `<user>`), and scrubs URL credentials (`scheme://user:pass@`), `Bearer`/JWT tokens, `KEY=VALUE` secrets, and sensitive CLI flags from commands and validation errors. Always review the output once before sharing.
+
+**Does `devup` phone home or check for updates automatically?**  
+No. Update checks are strictly opt-in (`--check-updates`, `devup doctor --online`, or `DEVUP_CHECK_UPDATES=1`), and can also be explicitly disabled with `--no-update-check` or `DEVUP_NO_UPDATE_CHECK=1`.
+
+**Why does `scoop install ./packaging/scoop/devup.json` fail on Windows?**  
+Scoop only treats a local JSON path as a file when written with Windows backslashes (`.\packaging\scoop\devup.json`) or as an `https://` URL, and requires Scoop's `main` bucket (`scoop bucket add main`) to resolve the `python` dependency.

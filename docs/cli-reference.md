@@ -34,9 +34,9 @@ Validates `devup.toml`, group expansions, task `depends_on` references, dependen
 - Exit code `0` when valid, `1` when errors are found.
 
 ### `devup doctor`
-Inspects the local environment: Python/OS details, `devup` version, detected external runners (`git`, `node`, `npm`, `pnpm`, `yarn`, `bun`, `poetry`, `pdm`, `hatch`, `poe`, `make`, `just`, `docker`, `java`, `mvn`, `gradle`), discovered task count, and config validation status.
-- `--json` — Output a shareable diagnostic JSON report with sensitive paths/environment keys redacted.
-- `--online` — Check PyPI for whether a newer `devup-cli` version is available.
+Inspects the local environment: Python/OS details, `devup` version, detected external runners (`git`, `node`, `npm`, `pnpm`, `yarn`, `bun`, `poetry`, `pdm`, `hatch`, `poe`, `make`, `just`, `docker`, `java`, `mvn`, `gradle`), discovered task count, and config validation status. Runs **offline by default**.
+- `--json` — Output a shareable diagnostic JSON report with sensitive data automatically redacted (user home directories, OS usernames, URL userinfo credentials `scheme://user:pass@`, `KEY=VALUE` / `Bearer` / `Basic` / JWT tokens, CLI secret flags, and sensitive environment variable values).
+- `--online` — Opt in to checking PyPI for whether a newer `devup-cli` version is available.
 
 ### `devup completion <shell>`
 Outputs a shell autocompletion script to stdout. Supported shells: `bash`, `zsh`, `fish`, `powershell`.

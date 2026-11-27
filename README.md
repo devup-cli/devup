@@ -81,11 +81,20 @@ pipx install git+https://github.com/devup-cli/devup.git
 # Or install locally from a cloned checkout
 pip install -e .
 
-# Homebrew (macOS / Linux via formula in packaging/homebrew/devup-cli.rb)
-brew install --build-from-source ./packaging/homebrew/devup-cli.rb
+# Homebrew (macOS / Linux — install from packaging/homebrew/devup-cli.rb via a local tap)
+TAP_DIR="$(brew --repository)/Library/Taps/devup-cli/homebrew-tap"
+mkdir -p "$TAP_DIR/Formula" && cp packaging/homebrew/devup-cli.rb "$TAP_DIR/Formula/"
+brew install --build-from-source devup-cli/tap/devup-cli
 
-# Scoop (Windows via manifest in packaging/scoop/devup.json)
-scoop install ./packaging/scoop/devup.json
+# Scoop (Windows — requires Python 3.11+ via Scoop's main bucket)
+scoop bucket add main
+scoop install https://raw.githubusercontent.com/devup-cli/devup/main/packaging/scoop/devup.json
+# Or from a cloned checkout (note Windows backslashes):
+scoop install .\packaging\scoop\devup.json
+
+# Portable single-file zipapp (requires Python 3.11+)
+curl -LO https://github.com/devup-cli/devup/releases/latest/download/devup.pyz
+python devup.pyz --help
 ```
 
 ### Shell Autocompletion
