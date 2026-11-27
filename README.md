@@ -13,10 +13,12 @@ Zero third-party runtime dependencies — pure Python 3.11+ standard library.
 - **Polyglot auto-discovery:**
   - `package.json` (automatically detects `pnpm`, `yarn`, `bun`, or `npm` from lockfiles, plus `workspaces` monorepos)
   - `pyproject.toml` (supports Poe the Poet, PDM, Hatch, Poetry scripts, and `[project.scripts]`)
+  - `pom.xml` (Maven lifecycle goals, Spring Boot / Quarkus / Exec plugins, `mvnw` / `mvnw.cmd` wrappers, and `<modules>`)
+  - `build.gradle` / `build.gradle.kts` (Gradle tasks, `bootRun`, `run`, `gradlew` / `gradlew.bat` wrappers, and `settings.gradle(.kts)` subprojects)
   - `Justfile` / `justfile` (recipes + doc comments)
   - `Makefile` / `GNUmakefile` (targets + `#` / `##` doc comments)
   - `compose.yaml` / `docker-compose.yml` (`compose:up`, `compose:down`, and per-service `compose:<service>`)
-  - `devup.toml` (custom tasks, service groups, defaults, working directories, env vars, `depends_on`, and `ready_pattern`)
+  - `devup.toml` (custom tasks, service groups, defaults, working directories, env vars, `depends_on`, and readiness checks)
 - **Parallel runner with readable logs:**
   - Distinct ANSI colors and aligned `[service]` prefixes per process
   - Optional `--timestamps` and `--no-prefix` modes
@@ -33,7 +35,7 @@ Zero third-party runtime dependencies — pure Python 3.11+ standard library.
 - **Interactive arrow-key picker (`devup pick`):**
   - Multi-select tasks/groups with `Up`/`Down`, `Space`, and `Enter` in a TTY (with numbered input fallback)
 - **Dependency & readiness ordering:**
-  - Start `web` only after `api` logs a `ready_pattern` regex or after `build` finishes cleanly
+  - Start `web` only after `api` passes an HTTP `ready_url` (`2xx`/`3xx`), TCP `ready_tcp` / `ready_port` probe, log `ready_pattern` regex, or after a build task finishes cleanly
 
 ## Installation
 
@@ -98,6 +100,8 @@ dev = ["db", "api", "web"]
 [tasks.db]
 command = "docker compose up postgres"
 port = 5432
+ready_tcp = "127.0.0.1:5432"
+ready_timeout = 30
 ready_pattern = "database system is ready to accept connections"
 
 [tasks.api]
@@ -106,7 +110,8 @@ cwd = "backend"
 port = 8000
 env_file = ".env.api"
 depends_on = ["db"]
-ready_pattern = "Uvicorn running on"
+ready_url = "http://127.0.0.1:8000/health"
+ready_timeout = 20
 watch = ["app/**/*.py"]
 env = { PORT = "8000" }
 

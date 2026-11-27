@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import tomllib
+import xml.etree.ElementTree as ET
 from pathlib import Path
 from typing import Any
 
 from devup.models import Task, WorkspaceConfig
+from devup.readiness import normalize_tcp_target, validate_ready_url
 
 _COMPOSE_FILES = (
     "compose.yaml",
@@ -19,11 +22,23 @@ _COMPOSE_FILES = (
 )
 _JUSTFILES = ("justfile", "Justfile", ".justfile")
 _MAKEFILES = ("GNUmakefile", "Makefile", "makefile")
+_GRADLE_FILES = ("build.gradle.kts", "build.gradle")
+_GRADLE_SETTINGS_FILES = ("settings.gradle.kts", "settings.gradle")
 
 _MAKE_TARGET_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)(?:\s*[^#\n]*)(?:#+\s*(.*))?$")
 _JUST_RECIPE_RE = re.compile(
     r"^@?([A-Za-z][A-Za-z0-9_-]*)(?:\s+[^:=\n]+?)?\s*:\s*(?:#\s*(.*))?$"
 )
+_GRADLE_REGISTER_RE = re.compile(
+    r"""tasks\.register(?:<[^>]+>)?\(\s*["']([A-Za-z0-9_-]+)["']"""
+)
+_GRADLE_KTS_DELEGATE_RE = re.compile(
+    r"""val\s+([A-Za-z][A-Za-z0-9_-]*)\s+by\s+tasks\.(?:registering|creating)"""
+)
+_GRADLE_GROOVY_TASK_RE = re.compile(
+    r"""^\s*task\s+([A-Za-z][A-Za-z0-9_-]*)\s*(?:\(|{|$)"""
+)
+_GRADLE_INCLUDE_RE = re.compile(r"""include\s*\(?\s*([^\n\)]+)""")
 
 
 def _register_task(
@@ -416,6 +431,197 @@ def _discover_compose(directory: Path, prefix: str = "") -> tuple[list[Task], li
     return tasks, []
 
 
+def _format_wrapper_cmd(wrapper_path: Path, directory: Path) -> str:
+    """Format wrapper script path relative to directory for shell invocation."""
+    rel = os.path.relpath(wrapper_path, directory)
+    if os.name == "nt":
+        return f'"{rel}"' if " " in rel else rel
+    if not rel.startswith((".", "/")):
+        rel = f"./{rel}"
+    return f'"{rel}"' if " " in rel else rel
+
+
+def _detect_maven_runner(directory: Path, root: Path) -> str:
+    """Detect Maven wrapper (mvnw.cmd / ./mvnw) or fall back to mvn."""
+    wrapper_name = "mvnw.cmd" if os.name == "nt" else "mvnw"
+    search_dirs = [directory] if directory == root else [directory, root]
+    for base in search_dirs:
+        candidate = base / wrapper_name
+        if candidate.is_file():
+            return _format_wrapper_cmd(candidate, directory)
+    return "mvn"
+
+
+def _xml_local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _discover_maven(
+    directory: Path,
+    root: Path,
+    prefix: str = "",
+) -> tuple[list[Task], list[str], list[str]]:
+    """Discover Maven lifecycle goals, plugins, and sub-modules from pom.xml."""
+    pom_path = directory / "pom.xml"
+    if not pom_path.is_file():
+        return [], [], []
+
+    try:
+        tree = ET.parse(pom_path)
+    except (OSError, ET.ParseError) as exc:
+        return [], [], [f"Failed to parse {pom_path}: {exc}"]
+
+    xml_root = tree.getroot()
+    mvn = _detect_maven_runner(directory, root)
+    tasks: list[Task] = []
+    seen: set[str] = set()
+    modules: list[str] = []
+
+    def add_task(name: str, goal: str, description: str) -> None:
+        full_name = f"{prefix}{name}"
+        if full_name in seen:
+            return
+        seen.add(full_name)
+        tasks.append(
+            Task(
+                name=full_name,
+                command=f"{mvn} {goal}",
+                source="pom.xml",
+                runner="maven",
+                description=description,
+                cwd=directory,
+                workspace=prefix.rstrip(":") or None,
+            )
+        )
+
+    for elem in xml_root.iter():
+        local = _xml_local_name(elem.tag)
+        if local == "module" and elem.text and elem.text.strip():
+            modules.append(elem.text.strip())
+        elif local == "artifactId" and elem.text:
+            artifact = elem.text.strip()
+            if artifact == "spring-boot-maven-plugin":
+                add_task("dev", "spring-boot:run", "Run Spring Boot application")
+            elif artifact == "quarkus-maven-plugin":
+                add_task("dev", "quarkus:dev", "Run Quarkus in dev mode")
+            elif artifact == "exec-maven-plugin":
+                add_task("exec", "exec:java", "Run main class via exec-maven-plugin")
+
+    for goal, desc in (
+        ("compile", "Compile project sources"),
+        ("test", "Run Maven tests"),
+        ("package", "Package Maven artifact"),
+        ("verify", "Run verification checks"),
+        ("clean", "Clean Maven target directory"),
+    ):
+        add_task(goal, goal, desc)
+
+    return tasks, modules, []
+
+
+def _detect_gradle_runner(directory: Path, root: Path) -> str:
+    """Detect Gradle wrapper (gradlew.bat / ./gradlew) or fall back to gradle."""
+    wrapper_name = "gradlew.bat" if os.name == "nt" else "gradlew"
+    search_dirs = [directory] if directory == root else [directory, root]
+    for base in search_dirs:
+        candidate = base / wrapper_name
+        if candidate.is_file():
+            return _format_wrapper_cmd(candidate, directory)
+    return "gradle"
+
+
+def _discover_gradle_subprojects(directory: Path) -> list[str]:
+    """Extract subproject relative directory paths from settings.gradle(.kts)."""
+    settings_path = next(
+        (directory / name for name in _GRADLE_SETTINGS_FILES if (directory / name).is_file()),
+        None,
+    )
+    if settings_path is None:
+        return []
+    try:
+        text = settings_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return []
+
+    subprojects: list[str] = []
+    for match in _GRADLE_INCLUDE_RE.finditer(text):
+        args_blob = match.group(1)
+        for quoted in re.findall(r"""["']([^"']+)["']""", args_blob):
+            rel = quoted.lstrip(":").replace(":", "/").strip()
+            if rel and rel not in subprojects:
+                subprojects.append(rel)
+    return subprojects
+
+
+def _discover_gradle(
+    directory: Path,
+    root: Path,
+    prefix: str = "",
+) -> tuple[list[Task], list[str], list[str]]:
+    """Discover Gradle tasks and subprojects from build.gradle(.kts) and settings.gradle(.kts)."""
+    gradle_path = next(
+        (directory / name for name in _GRADLE_FILES if (directory / name).is_file()),
+        None,
+    )
+    subprojects = _discover_gradle_subprojects(directory)
+    if gradle_path is None and not subprojects:
+        return [], [], []
+
+    gradle = _detect_gradle_runner(directory, root)
+    tasks: list[Task] = []
+    seen: set[str] = set()
+    warnings: list[str] = []
+    source_name = gradle_path.name if gradle_path is not None else "settings.gradle"
+
+    def add_task(name: str, gradle_task: str, description: str) -> None:
+        full_name = f"{prefix}{name}"
+        if full_name in seen:
+            return
+        seen.add(full_name)
+        tasks.append(
+            Task(
+                name=full_name,
+                command=f"{gradle} {gradle_task}",
+                source=source_name,
+                runner="gradle",
+                description=description,
+                cwd=directory,
+                workspace=prefix.rstrip(":") or None,
+            )
+        )
+
+    if gradle_path is not None:
+        try:
+            content = gradle_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return [], subprojects, [f"Failed to read {gradle_path}: {exc}"]
+
+        if "org.springframework.boot" in content:
+            add_task("bootRun", "bootRun", "Run Spring Boot application")
+        if re.search(r"""\bapplication\b|\bmainClass\b""", content):
+            add_task("run", "run", "Run Gradle application")
+
+        for regex in (_GRADLE_REGISTER_RE, _GRADLE_KTS_DELEGATE_RE):
+            for match in regex.finditer(content):
+                tname = match.group(1)
+                add_task(tname, tname, f"Custom Gradle task '{tname}'")
+        for line in content.splitlines():
+            match = _GRADLE_GROOVY_TASK_RE.match(line)
+            if match:
+                tname = match.group(1)
+                add_task(tname, tname, f"Custom Gradle task '{tname}'")
+
+    for task_name, desc in (
+        ("build", "Assemble and test Gradle project"),
+        ("test", "Run Gradle tests"),
+        ("check", "Run Gradle verification checks"),
+        ("clean", "Clean Gradle build directory"),
+    ):
+        add_task(task_name, task_name, desc)
+
+    return tasks, subprojects, warnings
+
+
 def _resolve_workspace_dirs(root: Path, patterns: list[str]) -> list[Path]:
     """Expand workspace glob patterns into sorted unique subdirectories."""
     dirs: list[Path] = []
@@ -441,8 +647,11 @@ def _discover_directory(
     prefix: str = "",
 ) -> list[str]:
     """Run all manifest scanners in priority order on a single directory."""
+    discovered_workspaces: list[str] = []
+
     pkg_tasks, pkg_workspaces, pkg_warnings = _discover_package_json(directory, root, prefix=prefix)
     warnings.extend(pkg_warnings)
+    discovered_workspaces.extend(pkg_workspaces)
     for task in pkg_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}node")
 
@@ -450,6 +659,18 @@ def _discover_directory(
     warnings.extend(py_warnings)
     for task in py_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}py")
+
+    mvn_tasks, mvn_modules, mvn_warnings = _discover_maven(directory, root, prefix=prefix)
+    warnings.extend(mvn_warnings)
+    discovered_workspaces.extend(mvn_modules)
+    for task in mvn_tasks:
+        _register_task(tasks, task, qualifier=f"{prefix}mvn")
+
+    gradle_tasks, gradle_subs, gradle_warnings = _discover_gradle(directory, root, prefix=prefix)
+    warnings.extend(gradle_warnings)
+    discovered_workspaces.extend(gradle_subs)
+    for task in gradle_tasks:
+        _register_task(tasks, task, qualifier=f"{prefix}gradle")
 
     just_tasks, just_warnings = _discover_justfile(directory, prefix=prefix)
     warnings.extend(just_warnings)
@@ -466,7 +687,7 @@ def _discover_directory(
     for task in compose_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}compose")
 
-    return pkg_workspaces
+    return discovered_workspaces
 
 
 def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
@@ -548,6 +769,27 @@ def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
                     else []
                 )
                 ready = entry.get("ready_pattern") if isinstance(entry.get("ready_pattern"), str) else None
+                ready_url: str | None = None
+                if isinstance(entry.get("ready_url"), str):
+                    try:
+                        ready_url = validate_ready_url(entry["ready_url"])
+                    except ValueError as exc:
+                        config.warnings.append(f"Task '{task_name}': {exc}")
+
+                ready_tcp: str | None = None
+                raw_tcp = entry.get("ready_tcp") if "ready_tcp" in entry else entry.get("ready_port")
+                if isinstance(raw_tcp, (str, int)) and not isinstance(raw_tcp, bool):
+                    try:
+                        ready_tcp = normalize_tcp_target(raw_tcp)
+                    except ValueError as exc:
+                        config.warnings.append(f"Task '{task_name}': {exc}")
+
+                ready_timeout = 30.0
+                if isinstance(entry.get("ready_timeout"), (int, float)) and not isinstance(
+                    entry.get("ready_timeout"), bool
+                ):
+                    ready_timeout = max(0.5, float(entry["ready_timeout"]))
+
                 desc = entry.get("description") if isinstance(entry.get("description"), str) else ""
                 task_env_files: list[str] = []
                 if isinstance(entry.get("env_file"), str):
@@ -585,6 +827,9 @@ def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
                         env=task_env,
                         depends_on=deps,
                         ready_pattern=ready,
+                        ready_url=ready_url,
+                        ready_tcp=ready_tcp,
+                        ready_timeout=ready_timeout,
                         env_files=task_env_files,
                         ports=task_ports,
                         watch=watch_patterns,

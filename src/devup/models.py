@@ -19,6 +19,9 @@ class Task:
     env: dict[str, str] = field(default_factory=dict)
     depends_on: list[str] = field(default_factory=list)
     ready_pattern: str | None = None
+    ready_url: str | None = None
+    ready_tcp: str | None = None
+    ready_timeout: float = 30.0
     aliases: list[str] = field(default_factory=list)
     workspace: str | None = None
     env_files: list[str] = field(default_factory=list)

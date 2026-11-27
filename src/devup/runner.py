@@ -29,6 +29,8 @@ from devup.colors import (
 from devup.dotenv import load_env_files
 from devup.models import Task, TaskResult, WorkspaceConfig
 from devup.ports import check_task_ports
+from devup.proc_tree import ManagedProcess, spawn_managed_process, terminate_managed_process
+from devup.readiness import probe_http, probe_tcp
 from devup.watcher import diff_snapshots, snapshot_tree
 
 
@@ -125,78 +127,6 @@ def _expand_dependencies(config: WorkspaceConfig, initial_targets: list[str]) ->
     return ordered
 
 
-def _terminate_process_tree(
-    proc: subprocess.Popen[str],
-    timeout: float,
-    force_immediately: bool = False,
-) -> None:
-    """Gracefully terminate a process and its descendants, force-killing on timeout."""
-    if proc.poll() is not None:
-        return
-
-    if os.name == "nt":
-        if not force_immediately:
-            try:
-                proc.send_signal(signal.CTRL_BREAK_EVENT)
-            except (OSError, ValueError):
-                pass
-            deadline = time.monotonic() + min(timeout, 1.5)
-            while time.monotonic() < deadline:
-                if proc.poll() is not None:
-                    return
-                time.sleep(0.05)
-
-        if proc.poll() is None:
-            # Ensure child processes (e.g. uvicorn workers, vite, node) are terminated too.
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=5,
-                    check=False,
-                )
-            except OSError:
-                pass
-        if proc.poll() is None:
-            try:
-                proc.kill()
-            except OSError:
-                pass
-        try:
-            proc.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            pass
-        return
-
-    # POSIX: signal the entire process group started via start_new_session=True.
-    if not force_immediately:
-        try:
-            os.killpg(proc.pid, signal.SIGTERM)
-        except ProcessLookupError:
-            return
-        except OSError:
-            proc.terminate()
-
-        deadline = time.monotonic() + timeout
-        while time.monotonic() < deadline:
-            if proc.poll() is not None:
-                return
-            time.sleep(0.05)
-
-    if proc.poll() is None:
-        try:
-            os.killpg(proc.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            return
-        except OSError:
-            proc.kill()
-    try:
-        proc.wait(timeout=2)
-    except subprocess.TimeoutExpired:
-        pass
-
-
 def _load_workspace_dotenv(
     config: WorkspaceConfig,
     opts: RunOptions,
@@ -245,28 +175,6 @@ def _build_task_env(
 
     env.update(task.env)
     return env, warnings
-
-
-def _spawn_task(task: Task, env: dict[str, str], root: os.PathLike[str] | str) -> subprocess.Popen[str]:
-    """Start a task subprocess in its own process group with merged output pipe."""
-    popen_kwargs: dict[str, object] = {
-        "shell": True,
-        "cwd": str(task.cwd or root),
-        "env": env,
-        "stdout": subprocess.PIPE,
-        "stderr": subprocess.STDOUT,
-        "stdin": subprocess.DEVNULL,
-        "text": True,
-        "encoding": "utf-8",
-        "errors": "replace",
-        "bufsize": 1,
-    }
-    if os.name == "nt":
-        popen_kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        popen_kwargs["start_new_session"] = True
-
-    return subprocess.Popen(task.command, **popen_kwargs)  # type: ignore[arg-type]
 
 
 def run_tasks(
@@ -351,7 +259,7 @@ def run_tasks(
     interrupted_event = threading.Event()
 
     procs_lock = threading.Lock()
-    active_procs: dict[str, subprocess.Popen[str]] = {}
+    active_procs: dict[str, ManagedProcess] = {}
     results_map: dict[str, TaskResult] = {}
 
     def stop_all(reason: str, force: bool = False) -> None:
@@ -362,8 +270,8 @@ def run_tasks(
             snapshot = list(active_procs.items())
         if snapshot:
             writer.write_system(reason, YELLOW)
-        for _, proc in snapshot:
-            _terminate_process_tree(proc, timeout=shutdown_timeout, force_immediately=force)
+        for _, managed in snapshot:
+            terminate_managed_process(managed, timeout=shutdown_timeout, force_immediately=force)
         for ev in ready_events.values():
             ev.set()
 
@@ -375,9 +283,19 @@ def run_tasks(
     def _handle_signal(signum: int, _frame: object) -> None:
         if not interrupted_event.is_set():
             interrupted_event.set()
-            stop_all("Interrupt received — stopping running services...", force=False)
+            stop_event.set()
+            threading.Thread(
+                target=stop_all,
+                args=("Interrupt received — stopping running services...", False),
+                daemon=True,
+            ).start()
         else:
-            stop_all("Second interrupt — force killing remaining services...", force=True)
+            force_kill_event.set()
+            threading.Thread(
+                target=stop_all,
+                args=("Second interrupt — force killing remaining services...", True),
+                daemon=True,
+            ).start()
 
     if is_main:
         prev_sigint = signal.getsignal(signal.SIGINT)
@@ -437,27 +355,54 @@ def run_tasks(
 
         while True:
             start = time.monotonic()
-            try:
-                proc = _spawn_task(task, env, config.root)
-            except OSError as exc:
-                dep_failed[name] = True
-                ready_events[name].set()
-                results_map[name] = TaskResult(
-                    name=name,
-                    exit_code=127,
-                    duration_seconds=time.monotonic() - start,
-                    status="error",
-                    error=str(exc),
-                )
-                writer.write_line(name, style(f"failed to start: {exc}", RED, enabled=use_color))
-                if fail_fast and not is_watched:
-                    stop_all(f"Task '{name}' failed to start — stopping other services...", force=False)
-                return
-
             with procs_lock:
-                active_procs[name] = proc
+                if stop_event.is_set():
+                    dep_failed[name] = True
+                    ready_events[name].set()
+                    results_map[name] = TaskResult(
+                        name=name,
+                        exit_code=0,
+                        duration_seconds=0.0,
+                        status="skipped",
+                    )
+                    return
+                try:
+                    managed = spawn_managed_process(
+                        task.command,
+                        cwd=str(task.cwd or config.root),
+                        env=env,
+                    )
+                except OSError as exc:
+                    dep_failed[name] = True
+                    ready_events[name].set()
+                    results_map[name] = TaskResult(
+                        name=name,
+                        exit_code=127,
+                        duration_seconds=time.monotonic() - start,
+                        status="error",
+                        error=str(exc),
+                    )
+                    writer.write_line(name, style(f"failed to start: {exc}", RED, enabled=use_color))
+                    if fail_fast and not is_watched:
+                        stop_all(f"Task '{name}' failed to start — stopping other services...", force=False)
+                    return
+                active_procs[name] = managed
 
+            proc = managed.proc
             pattern = ready_regexes[name]
+            has_network_probe = bool(task.ready_url or task.ready_tcp)
+            pattern_event = threading.Event()
+            if pattern is None:
+                pattern_event.set()
+            probe_event = threading.Event()
+            if not has_network_probe:
+                probe_event.set()
+            attempt_done = threading.Event()
+            probe_timed_out = threading.Event()
+
+            def maybe_mark_ready() -> None:
+                if pattern_event.is_set() and probe_event.is_set() and not ready_events[name].is_set():
+                    ready_events[name].set()
 
             def pump_output(active_proc: subprocess.Popen[str] = proc) -> None:
                 if active_proc.stdout is None:
@@ -466,22 +411,69 @@ def run_tasks(
                     for raw_line in active_proc.stdout:
                         cleaned = raw_line.rstrip("\r\n")
                         writer.write_line(name, cleaned)
-                        if pattern is not None and not ready_events[name].is_set():
+                        if pattern is not None and not pattern_event.is_set():
                             if pattern.search(cleaned):
-                                ready_events[name].set()
+                                pattern_event.set()
+                                maybe_mark_ready()
                 except ValueError:
                     pass
 
+            def run_network_probe() -> None:
+                deadline = start + task.ready_timeout
+                targets_desc = " & ".join(
+                    p for p in (task.ready_tcp and f"tcp://{task.ready_tcp}", task.ready_url) if p
+                )
+                while not stop_event.is_set() and not attempt_done.is_set():
+                    tcp_ok = probe_tcp(task.ready_tcp) if task.ready_tcp else True
+                    http_ok = probe_http(task.ready_url) if task.ready_url else True
+                    if tcp_ok and http_ok:
+                        probe_event.set()
+                        writer.write_line(
+                            name,
+                            style(f"ready ({targets_desc})", GREEN, enabled=use_color),
+                        )
+                        maybe_mark_ready()
+                        return
+                    if time.monotonic() >= deadline:
+                        probe_timed_out.set()
+                        dep_failed[name] = True
+                        writer.write_line(
+                            name,
+                            style(
+                                f"readiness check timed out after {task.ready_timeout:.1f}s ({targets_desc})",
+                                RED,
+                                enabled=use_color,
+                            ),
+                        )
+                        ready_events[name].set()
+                        if fail_fast and not is_watched and not stop_event.is_set():
+                            stop_all(
+                                f"Task '{name}' readiness check timed out — stopping remaining services...",
+                                force=False,
+                            )
+                        else:
+                            terminate_managed_process(managed, timeout=shutdown_timeout)
+                        return
+                    time.sleep(0.15)
+
             reader = threading.Thread(target=pump_output, name=f"devup-log-{name}", daemon=True)
             reader.start()
+            probe_thread: threading.Thread | None = None
+            if has_network_probe:
+                probe_thread = threading.Thread(
+                    target=run_network_probe,
+                    name=f"devup-probe-{name}",
+                    daemon=True,
+                )
+                probe_thread.start()
 
             restart_requested = False
             next_watch_poll = time.monotonic() + opts.watch_interval
 
             while proc.poll() is None:
                 if stop_event.is_set():
-                    _terminate_process_tree(
-                        proc,
+                    terminate_managed_process(
+                        managed,
                         timeout=shutdown_timeout,
                         force_immediately=force_kill_event.is_set(),
                     )
@@ -498,10 +490,13 @@ def run_tasks(
                             CYAN,
                         )
                         restart_requested = True
-                        _terminate_process_tree(proc, timeout=shutdown_timeout)
+                        terminate_managed_process(managed, timeout=shutdown_timeout)
                         break
                 time.sleep(0.05)
 
+            attempt_done.set()
+            if probe_thread is not None:
+                probe_thread.join(timeout=1.0)
             reader.join(timeout=1.0)
             if proc.stdout is not None:
                 try:
@@ -511,6 +506,7 @@ def run_tasks(
 
             with procs_lock:
                 active_procs.pop(name, None)
+            managed.close()
 
             exit_code = proc.returncode if proc.returncode is not None else 1
             duration = time.monotonic() - start
@@ -520,7 +516,11 @@ def run_tasks(
                 env, _ = _build_task_env(config, task, workspace_dotenv)
                 continue
 
-            if interrupted_event.is_set() or (stop_event.is_set() and exit_code != 0):
+            if probe_timed_out.is_set():
+                status = "failed"
+                exit_code = exit_code if exit_code != 0 else 1
+                dep_failed[name] = True
+            elif interrupted_event.is_set() or (stop_event.is_set() and exit_code != 0):
                 status = "stopped"
             elif exit_code == 0:
                 status = "ok"

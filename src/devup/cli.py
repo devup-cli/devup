@@ -136,6 +136,8 @@ def _print_list(config: WorkspaceConfig, out: TextIO, use_color: bool, as_json: 
                     "cwd": str(task.cwd) if task.cwd else str(config.root),
                     "depends_on": task.depends_on,
                     "ready_pattern": task.ready_pattern,
+                    "ready_url": task.ready_url,
+                    "ready_tcp": task.ready_tcp,
                 }
                 for name, task in config.tasks.items()
             },
