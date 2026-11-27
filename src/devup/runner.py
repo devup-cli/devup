@@ -284,18 +284,24 @@ def run_tasks(
         if not interrupted_event.is_set():
             interrupted_event.set()
             stop_event.set()
-            threading.Thread(
+            t = threading.Thread(
                 target=stop_all,
                 args=("Interrupt received — stopping running services...", False),
                 daemon=True,
-            ).start()
+            )
+            stop_threads.append(t)
+            t.start()
         else:
             force_kill_event.set()
-            threading.Thread(
+            t = threading.Thread(
                 target=stop_all,
                 args=("Second interrupt — force killing remaining services...", True),
                 daemon=True,
-            ).start()
+            )
+            stop_threads.append(t)
+            t.start()
+
+    stop_threads: list[threading.Thread] = []
 
     if is_main:
         prev_sigint = signal.getsignal(signal.SIGINT)
@@ -599,8 +605,15 @@ def run_tasks(
         with ThreadPoolExecutor(max_workers=len(ordered_names), thread_name_prefix="devup-task") as pool:
             futures = [pool.submit(run_one, name) for name in ordered_names]
             for fut in futures:
-                fut.result()
+                while not fut.done():
+                    try:
+                        # Short timeout lets the main thread wake promptly to process SIGINT/SIGTERM.
+                        fut.result(timeout=0.1)
+                    except TimeoutError:
+                        pass
     finally:
+        for t in stop_threads:
+            t.join(timeout=1.0)
         if is_main:
             if prev_sigint is not None:
                 signal.signal(signal.SIGINT, prev_sigint)

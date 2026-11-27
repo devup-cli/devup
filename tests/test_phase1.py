@@ -532,12 +532,16 @@ class ProcessCleanupAndCrossPlatformTests(unittest.TestCase):
                 },
             )
             buf = io.StringIO()
+            main_ident = threading.main_thread().ident
 
             def send_sigint() -> None:
                 deadline = time.monotonic() + 3.0
                 while "STARTED" not in buf.getvalue() and time.monotonic() < deadline:
                     time.sleep(0.05)
-                signal.raise_signal(signal.SIGINT)
+                if os.name != "nt" and hasattr(signal, "pthread_kill") and main_ident is not None:
+                    signal.pthread_kill(main_ident, signal.SIGINT)
+                else:
+                    signal.raise_signal(signal.SIGINT)
 
             t0 = time.monotonic()
             trigger = threading.Thread(target=send_sigint, daemon=True)
