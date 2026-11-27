@@ -3,8 +3,8 @@ class DevupCli < Formula
 
   desc "Polyglot project script discovery and multi-service parallel runner"
   homepage "https://devup-cli.github.io/devup/"
-  url "https://files.pythonhosted.org/packages/source/d/devup-cli/devup_cli-0.3.0.tar.gz"
-  sha256 "REPLACE_WITH_RELEASE_SHA256"
+  url "https://files.pythonhosted.org/packages/c4/22/3052906f5f3b4357834475e450f3dcbeca41e7bfa14ea3d5f7c48629ae96/devup_cli-0.3.0.tar.gz"
+  sha256 "b122b139d250af786c94f23f5abafcf93d4cccb9681322fd75f65811793ad3c9"
   license "MIT"
 
   depends_on "python@3.12"

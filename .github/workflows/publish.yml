@@ -84,7 +84,7 @@ jobs:
       - name: Upload devup.pyz to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" dist-zipapp/devup.pyz --clobber
+        run: gh release upload "${{ github.ref_name }}" dist-zipapp/devup.pyz --repo "${{ github.repository }}" --clobber
 
   verify-pypi:
     name: Post-publication PyPI smoke test
