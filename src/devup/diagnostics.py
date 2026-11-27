@@ -84,14 +84,17 @@ _URL_USERINFO_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9+.-]*://)([^/\s:@\"']+(?::[^/\s@\"']*)?)@"
 )
 
-# Match KEY=VALUE or KEY: VALUE where KEY contains a sensitive word
+# Match KEY=VALUE or KEY: VALUE where KEY contains a sensitive word (skipping Bearer/Basic prefix handled separately)
 _KV_SECRET_RE = re.compile(
-    r"""(\b[A-Za-z0-9_]*(?:SECRET|TOKEN|KEY|PASS|PASSWORD|PWD|AUTH|COOKIE|CREDENTIAL|PRIVATE|DSN|DATABASE_URL)[A-Za-z0-9_]*\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+    r"""(\b[A-Za-z0-9_]*(?:SECRET|TOKEN|KEY|PASS|PASSWORD|PWD|AUTH|COOKIE|CREDENTIAL|PRIVATE|DSN|DATABASE_URL)[A-Za-z0-9_]*\s*[=:]\s*)(?!Bearer\b|Basic\b)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
     re.IGNORECASE,
 )
 
 # Match Bearer / Basic authorization tokens
 _BEARER_RE = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+# Match JWT tokens directly as defense-in-depth
+_JWT_RE = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]+\b")
 
 # Match sensitive CLI flags like --token xyz, --password=abc, --api-key "xyz"
 _CLI_SECRET_FLAG_RE = re.compile(
@@ -166,8 +169,9 @@ def redact_text(text: str) -> str:
         )
 
     text = _URL_USERINFO_RE.sub(r"\1<redacted>@", text)
-    text = _KV_SECRET_RE.sub(r"\1<redacted>", text)
     text = _BEARER_RE.sub(r"\1 <redacted>", text)
+    text = _JWT_RE.sub("<redacted>", text)
+    text = _KV_SECRET_RE.sub(r"\1<redacted>", text)
     text = _CLI_SECRET_FLAG_RE.sub(r"\1<redacted>", text)
 
     # Scrub literal values of sensitive environment variables if present in errors or commands.

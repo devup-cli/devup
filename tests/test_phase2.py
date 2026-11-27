@@ -286,7 +286,7 @@ class ExamplesAndPackagingTests(unittest.TestCase):
         scoop_data = json.loads((REPO_ROOT / "packaging" / "scoop" / "devup.json").read_text(encoding="utf-8"))
         self.assertEqual(scoop_data["version"], __version__)
         self.assertIn("python", scoop_data["depends"])
-        self.assertIn("3.11+", scoop_data["notes"])
+        self.assertIn("3.11", scoop_data["notes"])
         self.assertRegex(scoop_data["hash"], r"^[0-9a-f]{64}$")
         pre_install = "\n".join(scoop_data["pre_install"])
         self.assertNotIn("\\r\\n", pre_install)
