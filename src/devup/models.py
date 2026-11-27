@@ -21,6 +21,10 @@ class Task:
     ready_pattern: str | None = None
     aliases: list[str] = field(default_factory=list)
     workspace: str | None = None
+    env_files: list[str] = field(default_factory=list)
+    ports: list[int] = field(default_factory=list)
+    watch: list[str] = field(default_factory=list)
+    watch_enabled: bool = False
 
 
 @dataclass(slots=True)
@@ -32,6 +36,9 @@ class WorkspaceConfig:
     groups: dict[str, list[str]] = field(default_factory=dict)
     default_targets: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
+    env_files: list[str] = field(default_factory=list)
+    auto_env: bool = True
+    strict_ports: bool = False
     fail_fast: bool = True
     shutdown_timeout: float = 5.0
     warnings: list[str] = field(default_factory=list)

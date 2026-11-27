@@ -10,8 +10,9 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
+from pathlib import Path
 from typing import TextIO
 
 from devup.colors import (
@@ -25,7 +26,10 @@ from devup.colors import (
     supports_color,
     style,
 )
+from devup.dotenv import load_env_files
 from devup.models import Task, TaskResult, WorkspaceConfig
+from devup.ports import check_task_ports
+from devup.watcher import diff_snapshots, snapshot_tree
 
 
 @dataclass(slots=True)
@@ -38,6 +42,12 @@ class RunOptions:
     prefix: bool = True
     color: bool | None = None
     dry_run: bool = False
+    dotenv: bool = True
+    extra_env_files: list[str] = field(default_factory=list)
+    port_check: bool = True
+    strict_ports: bool | None = None
+    watch: bool = False
+    watch_interval: float = 0.4
 
 
 class _OutputWriter:
@@ -187,13 +197,54 @@ def _terminate_process_tree(
         pass
 
 
-def _build_task_env(config: WorkspaceConfig, task: Task) -> dict[str, str]:
-    """Merge process environment, workspace env, and task-specific env."""
+def _load_workspace_dotenv(
+    config: WorkspaceConfig,
+    opts: RunOptions,
+) -> tuple[dict[str, str], list[str]]:
+    """Load root .env (when auto_env is enabled) plus configured workspace env_files."""
+    merged: dict[str, str] = {}
+    warnings: list[str] = []
+
+    if opts.dotenv and config.auto_env:
+        default_env = config.root / ".env"
+        if default_env.is_file():
+            vals, warns = load_env_files([default_env], config.root, warn_missing=False)
+            merged.update(vals)
+            warnings.extend(warns)
+
+    explicit_files = [*config.env_files, *opts.extra_env_files]
+    if explicit_files:
+        vals, warns = load_env_files(explicit_files, config.root, warn_missing=True)
+        merged.update(vals)
+        warnings.extend(warns)
+
+    return merged, warnings
+
+
+def _build_task_env(
+    config: WorkspaceConfig,
+    task: Task,
+    workspace_dotenv: dict[str, str],
+) -> tuple[dict[str, str], list[str]]:
+    """Merge process environment, dotenv files, workspace env, and task-specific env."""
     env = os.environ.copy()
     env.setdefault("PYTHONUNBUFFERED", "1")
+    for key, val in workspace_dotenv.items():
+        env.setdefault(key, val)
     env.update(config.env)
+
+    warnings: list[str] = []
+    if task.env_files:
+        task_dotenv, warns = load_env_files(
+            task.env_files,
+            task.cwd or config.root,
+            warn_missing=True,
+        )
+        env.update(task_dotenv)
+        warnings.extend(warns)
+
     env.update(task.env)
-    return env
+    return env, warnings
 
 
 def _spawn_task(task: Task, env: dict[str, str], root: os.PathLike[str] | str) -> subprocess.Popen[str]:
@@ -223,12 +274,14 @@ def run_tasks(
     targets: list[str],
     options: RunOptions | None = None,
     stream: TextIO | None = None,
+    stop_signal: threading.Event | None = None,
 ) -> list[TaskResult]:
     """Execute one or more tasks in parallel respecting dependencies and shutdown signals."""
     opts = options or RunOptions()
     out = stream or sys.stdout
     use_color = supports_color(out, force=opts.color)
     fail_fast = config.fail_fast if opts.fail_fast is None else opts.fail_fast
+    strict_ports = config.strict_ports if opts.strict_ports is None else opts.strict_ports
     shutdown_timeout = (
         config.shutdown_timeout if opts.shutdown_timeout is None else opts.shutdown_timeout
     )
@@ -259,6 +312,31 @@ def run_tasks(
             results.append(TaskResult(name=name, exit_code=0, duration_seconds=0.0, status="ok"))
         return results
 
+    workspace_dotenv, dotenv_warnings = _load_workspace_dotenv(config, opts)
+    for warn in dotenv_warnings:
+        writer.write_system(warn, YELLOW)
+
+    if opts.port_check:
+        conflicts = check_task_ports(config.tasks, ordered_names)
+        if conflicts:
+            for conflict in conflicts:
+                writer.write_system(
+                    f"Port {'error' if strict_ports else 'warning'} ({conflict.task_name}): {conflict.reason}",
+                    RED if strict_ports else YELLOW,
+                )
+            if strict_ports:
+                conflict_by_task = {c.task_name: c for c in conflicts}
+                return [
+                    TaskResult(
+                        name=name,
+                        exit_code=2 if name in conflict_by_task else 1,
+                        duration_seconds=0.0,
+                        status="error" if name in conflict_by_task else "skipped",
+                        error=conflict_by_task[name].reason if name in conflict_by_task else None,
+                    )
+                    for name in ordered_names
+                ]
+
     ready_events: dict[str, threading.Event] = {name: threading.Event() for name in ordered_names}
     dep_failed: dict[str, bool] = {name: False for name in ordered_names}
     ready_regexes: dict[str, re.Pattern[str] | None] = {
@@ -268,7 +346,7 @@ def run_tasks(
         for name in ordered_names
     }
 
-    stop_event = threading.Event()
+    stop_event = stop_signal or threading.Event()
     force_kill_event = threading.Event()
     interrupted_event = threading.Event()
 
@@ -348,108 +426,163 @@ def run_tasks(
             )
             return
 
-        start = time.monotonic()
-        env = _build_task_env(config, task)
-        try:
-            proc = _spawn_task(task, env, config.root)
-        except OSError as exc:
-            dep_failed[name] = True
+        is_watched = opts.watch or task.watch_enabled
+        watch_dir = Path(task.cwd or config.root)
+        watch_patterns = task.watch or None
+        snap = snapshot_tree(watch_dir, watch_patterns) if is_watched else {}
+
+        env, task_env_warnings = _build_task_env(config, task, workspace_dotenv)
+        for warn in task_env_warnings:
+            writer.write_line(name, style(warn, YELLOW, enabled=use_color))
+
+        while True:
+            start = time.monotonic()
+            try:
+                proc = _spawn_task(task, env, config.root)
+            except OSError as exc:
+                dep_failed[name] = True
+                ready_events[name].set()
+                results_map[name] = TaskResult(
+                    name=name,
+                    exit_code=127,
+                    duration_seconds=time.monotonic() - start,
+                    status="error",
+                    error=str(exc),
+                )
+                writer.write_line(name, style(f"failed to start: {exc}", RED, enabled=use_color))
+                if fail_fast and not is_watched:
+                    stop_all(f"Task '{name}' failed to start — stopping other services...", force=False)
+                return
+
+            with procs_lock:
+                active_procs[name] = proc
+
+            pattern = ready_regexes[name]
+
+            def pump_output(active_proc: subprocess.Popen[str] = proc) -> None:
+                if active_proc.stdout is None:
+                    return
+                try:
+                    for raw_line in active_proc.stdout:
+                        cleaned = raw_line.rstrip("\r\n")
+                        writer.write_line(name, cleaned)
+                        if pattern is not None and not ready_events[name].is_set():
+                            if pattern.search(cleaned):
+                                ready_events[name].set()
+                except ValueError:
+                    pass
+
+            reader = threading.Thread(target=pump_output, name=f"devup-log-{name}", daemon=True)
+            reader.start()
+
+            restart_requested = False
+            next_watch_poll = time.monotonic() + opts.watch_interval
+
+            while proc.poll() is None:
+                if stop_event.is_set():
+                    _terminate_process_tree(
+                        proc,
+                        timeout=shutdown_timeout,
+                        force_immediately=force_kill_event.is_set(),
+                    )
+                    break
+                if is_watched and time.monotonic() >= next_watch_poll:
+                    next_watch_poll = time.monotonic() + opts.watch_interval
+                    new_snap = snapshot_tree(watch_dir, watch_patterns)
+                    changed = diff_snapshots(snap, new_snap)
+                    if changed is not None:
+                        time.sleep(0.15)
+                        snap = snapshot_tree(watch_dir, watch_patterns)
+                        writer.write_system(
+                            f"Change detected in {changed.name} — restarting '{name}'...",
+                            CYAN,
+                        )
+                        restart_requested = True
+                        _terminate_process_tree(proc, timeout=shutdown_timeout)
+                        break
+                time.sleep(0.05)
+
+            reader.join(timeout=1.0)
+            if proc.stdout is not None:
+                try:
+                    proc.stdout.close()
+                except OSError:
+                    pass
+
+            with procs_lock:
+                active_procs.pop(name, None)
+
+            exit_code = proc.returncode if proc.returncode is not None else 1
+            duration = time.monotonic() - start
+
+            if restart_requested and not stop_event.is_set():
+                ready_events[name].set()
+                env, _ = _build_task_env(config, task, workspace_dotenv)
+                continue
+
+            if interrupted_event.is_set() or (stop_event.is_set() and exit_code != 0):
+                status = "stopped"
+            elif exit_code == 0:
+                status = "ok"
+            else:
+                status = "failed"
+                if not is_watched:
+                    dep_failed[name] = True
+
             ready_events[name].set()
             results_map[name] = TaskResult(
                 name=name,
-                exit_code=127,
-                duration_seconds=time.monotonic() - start,
-                status="error",
-                error=str(exc),
+                exit_code=exit_code,
+                duration_seconds=duration,
+                status=status,
             )
-            writer.write_line(name, style(f"failed to start: {exc}", RED, enabled=use_color))
-            if fail_fast:
-                stop_all(f"Task '{name}' failed to start — stopping other services...", force=False)
-            return
 
-        with procs_lock:
-            active_procs[name] = proc
-
-        pattern = ready_regexes[name]
-
-        def pump_output() -> None:
-            if proc.stdout is None:
-                return
-            try:
-                for raw_line in proc.stdout:
-                    cleaned = raw_line.rstrip("\r\n")
-                    writer.write_line(name, cleaned)
-                    if pattern is not None and not ready_events[name].is_set():
-                        if pattern.search(cleaned):
-                            ready_events[name].set()
-            except ValueError:
-                pass
-
-        reader = threading.Thread(target=pump_output, name=f"devup-log-{name}", daemon=True)
-        reader.start()
-
-        # Monitor process exit while staying responsive to stop_event.
-        while proc.poll() is None:
-            if stop_event.is_set():
-                _terminate_process_tree(
-                    proc,
-                    timeout=shutdown_timeout,
-                    force_immediately=force_kill_event.is_set(),
+            if status == "ok":
+                writer.write_line(
+                    name,
+                    style(f"exited with code 0 ({duration:.2f}s)", GREEN, enabled=use_color),
                 )
+            elif status == "stopped":
+                writer.write_line(
+                    name,
+                    style(f"stopped ({duration:.2f}s)", YELLOW, enabled=use_color),
+                )
+            else:
+                writer.write_line(
+                    name,
+                    style(f"exited with code {exit_code} ({duration:.2f}s)", RED, enabled=use_color),
+                )
+                if fail_fast and not is_watched and not stop_event.is_set():
+                    stop_all(
+                        f"Task '{name}' exited with code {exit_code} — stopping remaining services...",
+                        force=False,
+                    )
+
+            if not is_watched or stop_event.is_set():
                 break
-            time.sleep(0.05)
 
-        reader.join(timeout=1.0)
-        if proc.stdout is not None:
-            try:
-                proc.stdout.close()
-            except OSError:
-                pass
-
-        with procs_lock:
-            active_procs.pop(name, None)
-
-        exit_code = proc.returncode if proc.returncode is not None else 1
-        duration = time.monotonic() - start
-
-        if interrupted_event.is_set() or (stop_event.is_set() and exit_code != 0):
-            status = "stopped"
-        elif exit_code == 0:
-            status = "ok"
-        else:
-            status = "failed"
-            dep_failed[name] = True
-
-        # Unblock dependents (either completed ok, or marked failed).
-        ready_events[name].set()
-
-        results_map[name] = TaskResult(
-            name=name,
-            exit_code=exit_code,
-            duration_seconds=duration,
-            status=status,
-        )
-
-        if status == "ok":
             writer.write_line(
                 name,
-                style(f"exited with code 0 ({duration:.2f}s)", GREEN, enabled=use_color),
+                style("watching for file changes...", DIM, enabled=use_color),
             )
-        elif status == "stopped":
-            writer.write_line(
-                name,
-                style(f"stopped ({duration:.2f}s)", YELLOW, enabled=use_color),
-            )
-        else:
-            writer.write_line(
-                name,
-                style(f"exited with code {exit_code} ({duration:.2f}s)", RED, enabled=use_color),
-            )
-            if fail_fast and not stop_event.is_set():
-                stop_all(
-                    f"Task '{name}' exited with code {exit_code} — stopping remaining services...",
-                    force=False,
-                )
+            while not stop_event.is_set():
+                time.sleep(opts.watch_interval)
+                if stop_event.is_set():
+                    break
+                new_snap = snapshot_tree(watch_dir, watch_patterns)
+                changed = diff_snapshots(snap, new_snap)
+                if changed is not None:
+                    time.sleep(0.15)
+                    snap = snapshot_tree(watch_dir, watch_patterns)
+                    writer.write_system(
+                        f"Change detected in {changed.name} — restarting '{name}'...",
+                        CYAN,
+                    )
+                    env, _ = _build_task_env(config, task, workspace_dotenv)
+                    break
+
+            if stop_event.is_set():
+                break
 
     try:
         with ThreadPoolExecutor(max_workers=len(ordered_names), thread_name_prefix="devup-task") as pool:

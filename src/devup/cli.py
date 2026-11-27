@@ -12,6 +12,7 @@ from devup import __version__
 from devup.colors import BOLD, CYAN, DIM, GREEN, RED, YELLOW, enable_windows_ansi, style, supports_color
 from devup.discovery import discover_workspace, resolve_targets
 from devup.models import TaskResult, WorkspaceConfig
+from devup.picker import PickChoice, pick_targets
 from devup.runner import RunOptions, run_tasks
 
 _SUBCOMMANDS = {"list", "ls", "run", "pick", "init"}
@@ -63,6 +64,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Show the resolved execution plan without starting processes.",
+    )
+    parser.add_argument(
+        "-w",
+        "--watch",
+        action="store_true",
+        help="Watch files under each task's working directory and auto-restart on changes.",
+    )
+    parser.add_argument(
+        "--env-file",
+        action="append",
+        default=[],
+        help="Load additional .env file(s) before starting tasks (can be repeated).",
+    )
+    parser.add_argument(
+        "--no-dotenv",
+        action="store_true",
+        help="Disable automatic loading of .env in the project root.",
+    )
+    parser.add_argument(
+        "--no-port-check",
+        action="store_true",
+        help="Skip pre-flight port availability checks.",
+    )
+    parser.add_argument(
+        "--strict-ports",
+        action="store_true",
+        help="Abort startup if any declared or inferred port is already in use.",
     )
     color_group = parser.add_mutually_exclusive_group()
     color_group.add_argument("--color", action="store_true", help="Force ANSI color output.")
@@ -164,44 +192,13 @@ def _interactive_pick(
     out: TextIO,
     use_color: bool,
 ) -> list[str]:
-    """Prompt the user to choose one or more tasks/groups from numbered entries."""
-    choices: list[tuple[str, str]] = []
+    """Prompt the user to choose one or more tasks/groups."""
+    choices: list[PickChoice] = []
     for gname, members in config.groups.items():
-        choices.append((gname, f"group: {', '.join(members)}"))
+        choices.append(PickChoice(name=gname, detail=f"group: {', '.join(members)}"))
     for tname, task in config.tasks.items():
-        choices.append((tname, f"{task.command} ({task.source})"))
-
-    if not choices:
-        return []
-
-    out.write(style("Select task(s) or group(s) to run:\n", BOLD, CYAN, enabled=use_color))
-    for idx, (label, detail) in enumerate(choices, start=1):
-        out.write(
-            f"  {style(f'{idx:>2}.', BOLD, enabled=use_color)} "
-            f"{style(label, GREEN, enabled=use_color)} "
-            f"{style(detail, DIM, enabled=use_color)}\n"
-        )
-    out.write("Enter numbers or names separated by spaces/commas (empty to cancel): ")
-    out.flush()
-
-    try:
-        raw = sys.stdin.readline()
-    except KeyboardInterrupt:
-        out.write("\n")
-        return []
-
-    tokens = [tok.strip() for tok in raw.replace(",", " ").split() if tok.strip()]
-    selected: list[str] = []
-    for tok in tokens:
-        if tok.isdigit():
-            idx = int(tok)
-            if 1 <= idx <= len(choices):
-                selected.append(choices[idx - 1][0])
-            else:
-                raise ValueError(f"Selection out of range: {tok}")
-        else:
-            selected.append(tok)
-    return selected
+        choices.append(PickChoice(name=tname, detail=f"{task.command} ({task.source})"))
+    return pick_targets(choices, out=out, use_color=use_color)
 
 
 def _init_devup_toml(config: WorkspaceConfig, force: bool, out: TextIO, use_color: bool) -> int:
@@ -324,6 +321,11 @@ def main(argv: Sequence[str] | None = None, stream: TextIO | None = None) -> int
         prefix=not args.no_prefix,
         color=color_pref,
         dry_run=args.dry_run,
+        dotenv=not args.no_dotenv,
+        extra_env_files=list(args.env_file),
+        port_check=not args.no_port_check,
+        strict_ports=True if args.strict_ports else None,
+        watch=args.watch,
     )
     try:
         results = run_tasks(config, resolved, options=run_opts, stream=out)

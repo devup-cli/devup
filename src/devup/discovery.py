@@ -487,8 +487,19 @@ def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
     if isinstance(data.get("fail_fast"), bool):
         config.fail_fast = data["fail_fast"]
 
+    if isinstance(data.get("auto_env"), bool):
+        config.auto_env = data["auto_env"]
+
+    if isinstance(data.get("strict_ports"), bool):
+        config.strict_ports = data["strict_ports"]
+
     if isinstance(data.get("shutdown_timeout"), (int, float)):
         config.shutdown_timeout = max(0.5, float(data["shutdown_timeout"]))
+
+    if isinstance(data.get("env_file"), str):
+        config.env_files = [data["env_file"]]
+    elif isinstance(data.get("env_file"), list):
+        config.env_files = [str(f) for f in data["env_file"] if isinstance(f, str)]
 
     if isinstance(data.get("default"), list):
         config.default_targets = [str(item) for item in data["default"] if isinstance(item, str)]
@@ -538,6 +549,30 @@ def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
                 )
                 ready = entry.get("ready_pattern") if isinstance(entry.get("ready_pattern"), str) else None
                 desc = entry.get("description") if isinstance(entry.get("description"), str) else ""
+                task_env_files: list[str] = []
+                if isinstance(entry.get("env_file"), str):
+                    task_env_files = [entry["env_file"]]
+                elif isinstance(entry.get("env_file"), list):
+                    task_env_files = [str(f) for f in entry["env_file"] if isinstance(f, str)]
+
+                task_ports: list[int] = []
+                if isinstance(entry.get("port"), int):
+                    task_ports = [entry["port"]]
+                elif isinstance(entry.get("ports"), list):
+                    task_ports = [p for p in entry["ports"] if isinstance(p, int)]
+
+                watch_enabled = False
+                watch_patterns: list[str] = []
+                raw_watch = entry.get("watch")
+                if isinstance(raw_watch, bool):
+                    watch_enabled = raw_watch
+                elif isinstance(raw_watch, str):
+                    watch_enabled = True
+                    watch_patterns = [raw_watch]
+                elif isinstance(raw_watch, list):
+                    watch_patterns = [str(w) for w in raw_watch if isinstance(w, str)]
+                    watch_enabled = bool(watch_patterns)
+
                 _register_task(
                     config.tasks,
                     Task(
@@ -550,6 +585,10 @@ def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
                         env=task_env,
                         depends_on=deps,
                         ready_pattern=ready,
+                        env_files=task_env_files,
+                        ports=task_ports,
+                        watch=watch_patterns,
+                        watch_enabled=watch_enabled,
                     ),
                     qualifier="devup",
                     allow_override=True,
