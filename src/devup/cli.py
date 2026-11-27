@@ -495,8 +495,10 @@ def _print_doctor(
 
     out.write(style("devup doctor\n", BOLD, CYAN, enabled=use_color))
     out.write(f"  devup version : {report['devup_version']}\n")
-    out.write(f"  python        : {report['python_version']} ({report['os']})\n")
+    out.write(f"  runtime       : python {report['python_version']} ({report['os']})\n")
     out.write(f"  project root  : {report['cwd']}\n")
+    if report.get("conflict_warning"):
+        out.write(style(f"  warning       : {report['conflict_warning']}\n", YELLOW, enabled=use_color))
     out.write(f"  devup.toml    : {'present' if report['devup_toml_present'] else 'absent'}\n")
     out.write(f"  .env          : {'present' if report['dotenv_present'] else 'absent'}\n")
     out.write(f"  sources       : {', '.join(report['sources']) or 'none'}\n")

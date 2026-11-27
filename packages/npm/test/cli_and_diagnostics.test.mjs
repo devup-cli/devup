@@ -111,6 +111,35 @@ cwd = "missing_dir"
   }
 });
 
+test("devup doctor detects conflicting devup binaries across PATH directories", async () => {
+  const { chmodSync, mkdirSync } = await import("node:fs");
+  const root = mkdtempSync(join(tmpdir(), "devup-npm-conflict-"));
+  const binA = join(root, "a");
+  const binB = join(root, "b");
+  mkdirSync(binA);
+  mkdirSync(binB);
+  const name = process.platform === "win32" ? "devup.cmd" : "devup";
+  for (const dir of [binA, binB]) {
+    const p = join(dir, name);
+    writeFileSync(p, "#!/bin/sh\necho ok\n", "utf8");
+    if (process.platform !== "win32") chmodSync(p, 0o755);
+  }
+
+  const prevPath = process.env.PATH || "";
+  process.env.PATH = [binA, binB, prevPath].join(process.platform === "win32" ? ";" : ":");
+  try {
+    const out = new CaptureStream();
+    await main(["-C", root, "doctor", "--json"], { stdout: out });
+    const report = JSON.parse(out.text());
+    assert.ok(report.installations.length >= 2);
+    assert.ok(report.conflict_warning);
+    assert.match(report.conflict_warning, /devup-py.*devup-node/);
+  } finally {
+    process.env.PATH = prevPath;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("update checks stay strictly opt-in and honor DEVUP_NO_UPDATE_CHECK", async () => {
   const prev = process.env.DEVUP_NO_UPDATE_CHECK;
   process.env.DEVUP_NO_UPDATE_CHECK = "1";

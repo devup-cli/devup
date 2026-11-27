@@ -186,3 +186,68 @@ watch = ["*.txt"]
     rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
   }
 });
+
+test("process-tree cleanup kills grandchild processes even when Python is not on PATH", async () => {
+  const { existsSync, readFileSync } = await import("node:fs");
+  const { spawnManagedProcess, terminateManagedProcess } = await import("../src/proc_tree.mjs");
+
+  const root = mkdtempSync(join(tmpdir(), "devup-npm-nopy-"));
+  const pidFile = join(root, "grandchild.pid");
+
+  // Strip Python entries from PATH for the child and current environment check
+  const prevPath = process.env.PATH || "";
+  const noPythonPath = prevPath
+    .split(process.platform === "win32" ? ";" : ":")
+    .filter((p) => p && !/python/i.test(p))
+    .join(process.platform === "win32" ? ";" : ":");
+  process.env.PATH = noPythonPath;
+
+  let grandchildPid = null;
+  try {
+    const childCode =
+      "const { spawn } = require('node:child_process'); " +
+      "const { writeFileSync } = require('node:fs'); " +
+      "const gc = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { stdio: 'ignore' }); " +
+      "writeFileSync(process.env.PID_FILE, String(gc.pid), 'utf8'); " +
+      "setTimeout(() => {}, 30000);";
+    const env = { ...process.env, PATH: noPythonPath, PID_FILE: pidFile };
+    const managed = spawnManagedProcess(
+      `"${process.execPath}" -e "${childCode}"`,
+      root,
+      env
+    );
+
+    const deadline = Date.now() + 5000;
+    while (!existsSync(pidFile) && Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 50));
+    }
+    assert.equal(existsSync(pidFile), true, "grandchild PID file was created");
+    grandchildPid = Number(readFileSync(pidFile, "utf8").trim());
+    assert.ok(Number.isInteger(grandchildPid) && grandchildPid > 0);
+
+    await terminateManagedProcess(managed, 1.0, false);
+
+    // Confirm grandchild is terminated cleanly without Python installed
+    let alive = true;
+    for (let i = 0; i < 15; i += 1) {
+      try {
+        process.kill(grandchildPid, 0);
+        await new Promise((r) => setTimeout(r, 80));
+      } catch {
+        alive = false;
+        break;
+      }
+    }
+    assert.equal(alive, false, `grandchild PID ${grandchildPid} should be terminated`);
+  } finally {
+    process.env.PATH = prevPath;
+    if (grandchildPid) {
+      try {
+        process.kill(grandchildPid, "SIGKILL");
+      } catch {
+        // Already exited
+      }
+    }
+    rmSync(root, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
+  }
+});

@@ -37,6 +37,7 @@ Issues = "https://github.com/devup-cli/devup/issues"
 
 [project.scripts]
 devup = "devup.cli:main"
+devup-py = "devup.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

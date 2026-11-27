@@ -122,3 +122,76 @@ jobs:
               print("Installed:", out_ver)
               doc = subprocess.check_output([str(vdev), "doctor", "--json"], text=True)
               assert "devup_version" in json.loads(doc)
+
+  build-npm:
+    name: Build & test npm package
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Run npm unit tests
+        working-directory: packages/npm
+        run: npm test
+      - name: Pack tarball
+        working-directory: packages/npm
+        run: |
+          mkdir -p ../../dist-npm
+          npm pack --pack-destination ../../dist-npm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dist-npm
+          path: dist-npm/
+
+  publish-npm:
+    name: Publish to npm (@devup-cli/devup)
+    needs: [build-npm]
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/@devup-cli/devup
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+      - name: Publish package to npm
+        working-directory: packages/npm
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance
+
+  verify-npm:
+    name: Post-publication npm smoke test
+    needs: [publish-npm]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - name: Install @devup-cli/devup from npm and smoke test
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME:-}"
+          SPEC="@devup-cli/devup"
+          if [[ "$TAG" == v* ]]; then
+            SPEC="@devup-cli/devup@${TAG#v}"
+          fi
+          installed=0
+          for attempt in $(seq 1 8); do
+            if npm install -g "$SPEC"; then
+              installed=1
+              break
+            fi
+            sleep 10
+          done
+          test "$installed" -eq 1
+          devup --version
+          devup-node --version
+          devup-node doctor --json > /dev/null
+          npm uninstall -g @devup-cli/devup

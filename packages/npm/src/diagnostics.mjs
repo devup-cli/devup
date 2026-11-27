@@ -1,6 +1,6 @@
-import { readFileSync } from "node:fs";
+import { accessSync, constants, readFileSync } from "node:fs";
 import os from "node:os";
-import { isAbsolute, join, resolve } from "node:path";
+import { delimiter, isAbsolute, join, resolve } from "node:path";
 
 import { loadEnvFiles } from "./dotenv.mjs";
 import { discoverWorkspace, resolveTargets } from "./discovery.mjs";
@@ -320,6 +320,38 @@ export function validateWorkspace(root, scanWorkspaces = true) {
   };
 }
 
+export function detectCliInstallations() {
+  const pathEnv = process.env.PATH || process.env.Path || "";
+  const isWin = process.platform === "win32";
+  const candidates = isWin
+    ? ["devup.exe", "devup.cmd", "devup.bat", "devup.ps1", "devup"]
+    : ["devup"];
+  const found = [];
+  const seenDirs = new Set();
+
+  for (const rawDir of pathEnv.split(delimiter)) {
+    if (!rawDir) continue;
+    const absDir = resolve(rawDir);
+    const normDir = isWin ? absDir.toLowerCase() : absDir;
+    if (seenDirs.has(normDir) || !isDir(absDir)) continue;
+    for (const fname of candidates) {
+      const cand = join(absDir, fname);
+      if (!isFile(cand)) continue;
+      if (!isWin) {
+        try {
+          accessSync(cand, constants.X_OK);
+        } catch {
+          continue;
+        }
+      }
+      seenDirs.add(normDir);
+      found.push(cand);
+      break;
+    }
+  }
+  return found;
+}
+
 export async function runDoctor(root, { online = false, scanWorkspaces = true } = {}) {
   const resolvedRoot = resolve(root);
   const validation = validateWorkspace(resolvedRoot, scanWorkspaces);
@@ -332,6 +364,15 @@ export async function runDoctor(root, { online = false, scanWorkspaces = true } 
       available: found !== null,
       path: found ? redactPath(found) : null,
     };
+  }
+
+  const installations = detectCliInstallations().map((p) => redactPath(p));
+  let conflictWarning = null;
+  if (installations.length > 1) {
+    conflictWarning =
+      `Multiple 'devup' executables found on PATH: ${installations.join(", ")}. ` +
+      "Uninstall one (`pipx uninstall devup-cli` or `npm uninstall -g @devup-cli/devup`), " +
+      "adjust PATH order, or invoke `devup-py` / `devup-node` explicitly.";
   }
 
   let dotenvKeys = [];
@@ -363,6 +404,8 @@ export async function runDoctor(root, { online = false, scanWorkspaces = true } 
     platform: `${os.platform()}-${os.release()}-${os.arch()}`,
     os: process.platform === "win32" ? "nt" : "posix",
     cwd: redactPath(resolvedRoot),
+    installations,
+    conflict_warning: conflictWarning,
     devup_toml_present: isFile(join(resolvedRoot, "devup.toml")),
     dotenv_present: isFile(dotenvPath),
     dotenv_keys: dotenvKeys,

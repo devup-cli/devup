@@ -329,6 +329,32 @@ def validate_workspace(root: Path, scan_workspaces: bool = True) -> ValidationRe
     )
 
 
+def detect_cli_installations() -> list[str]:
+    """Find distinct 'devup' executables visible on PATH in precedence order."""
+    path_env = os.environ.get("PATH") or os.environ.get("Path") or ""
+    candidates = ("devup.exe", "devup.cmd", "devup.bat", "devup.ps1", "devup") if os.name == "nt" else ("devup",)
+    found: list[str] = []
+    seen_dirs: set[str] = set()
+
+    for raw_dir in path_env.split(os.pathsep):
+        if not raw_dir:
+            continue
+        norm_dir = os.path.normcase(os.path.abspath(raw_dir))
+        if norm_dir in seen_dirs:
+            continue
+        dir_path = Path(raw_dir)
+        if not dir_path.is_dir():
+            continue
+        for fname in candidates:
+            cand = dir_path / fname
+            if cand.is_file() and (os.name == "nt" or os.access(cand, os.X_OK)):
+                seen_dirs.add(norm_dir)
+                found.append(str(cand))
+                break
+
+    return found
+
+
 def run_doctor(
     root: Path,
     online: bool = False,
@@ -346,6 +372,15 @@ def run_doctor(
             "available": found is not None,
             "path": redact_path(found) if found else None,
         }
+
+    installations = [redact_path(p) for p in detect_cli_installations()]
+    conflict_warning: str | None = None
+    if len(installations) > 1:
+        conflict_warning = (
+            f"Multiple 'devup' executables found on PATH: {', '.join(installations)}. "
+            "Uninstall one (`pipx uninstall devup-cli` or `npm uninstall -g @devup-cli/devup`), "
+            "adjust PATH order, or invoke `devup-py` / `devup-node` explicitly."
+        )
 
     dotenv_keys: list[str] = []
     if (resolved_root / ".env").is_file():
@@ -365,10 +400,13 @@ def run_doctor(
 
     return {
         "devup_version": __version__,
+        "runtime": "python",
         "python_version": sys.version.split()[0],
         "platform": platform.platform(),
         "os": os.name,
         "cwd": redact_path(resolved_root),
+        "installations": installations,
+        "conflict_warning": conflict_warning,
         "devup_toml_present": (resolved_root / "devup.toml").is_file(),
         "dotenv_present": (resolved_root / ".env").is_file(),
         "dotenv_keys": dotenv_keys,

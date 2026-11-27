@@ -287,6 +287,13 @@ export function parseCliArgs(argv) {
       default:
         if (flag.startsWith("-C") && flag.length > 2 && inlineVal === null) {
           args.cwd = flag.slice(2);
+        } else if (/^-[wtVh]+$/.test(flag) && inlineVal === null) {
+          for (const ch of flag.slice(1)) {
+            if (ch === "w") args.watch = true;
+            else if (ch === "t") args.timestamps = true;
+            else if (ch === "V") args.version = true;
+            else if (ch === "h") args.help = true;
+          }
         } else {
           throw new Error(`unrecognized argument: ${token}`);
         }
@@ -546,8 +553,11 @@ async function printDoctor(root, scanWorkspaces, online, out, useColor, asJson) 
 
   out.write(style("devup doctor\n", BOLD, CYAN, { enabled: useColor }));
   out.write(`  devup version : ${report.devup_version}\n`);
-  out.write(`  node          : ${report.node_version} (${report.os})\n`);
+  out.write(`  runtime       : node ${report.node_version} (${report.os})\n`);
   out.write(`  project root  : ${report.cwd}\n`);
+  if (report.conflict_warning) {
+    out.write(style(`  warning       : ${report.conflict_warning}\n`, YELLOW, { enabled: useColor }));
+  }
   out.write(`  devup.toml    : ${report.devup_toml_present ? "present" : "absent"}\n`);
   out.write(`  .env          : ${report.dotenv_present ? "present" : "absent"}\n`);
   out.write(`  sources       : ${report.sources.join(", ") || "none"}\n`);

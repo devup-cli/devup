@@ -45,3 +45,6 @@ No. Update checks are strictly opt-in (`--check-updates`, `devup doctor --online
 
 **Why does `scoop install ./packaging/scoop/devup.json` fail on Windows?**  
 Scoop only treats a local JSON path as a file when written with Windows backslashes (`.\packaging\scoop\devup.json`) or as an `https://` URL, and requires Scoop's `main` bucket (`scoop bucket add main`) to resolve the `python` dependency.
+
+**What if both the Python (`devup-cli`) and Node.js (`@devup-cli/devup`) packages are installed?**  
+Run `devup doctor` to see which runtime is currently first on `PATH` and whether another `devup` executable is shadowed. Uninstall whichever copy you don't need (`pipx uninstall devup-cli` or `npm uninstall -g @devup-cli/devup`), or invoke a specific runtime directly with `devup-py` or `devup-node`.

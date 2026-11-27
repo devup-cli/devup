@@ -1,7 +1,5 @@
 import { spawn } from "node:child_process";
 
-import { which } from "./fs_utils.mjs";
-
 let taskkillUnavailable = false;
 let cimUnavailable = false;
 
@@ -100,38 +98,69 @@ export async function snapshotWindowsDescendants(rootPid) {
   return descendants;
 }
 
-async function win32ToolhelpKillTree(rootPid) {
+/**
+ * Pure Windows fallback (zero Python dependency) using PowerShell + Win32
+ * CreateToolhelp32Snapshot / TerminateProcess when taskkill and CIM are unavailable.
+ */
+async function psToolhelpKillTree(rootPid) {
   if (process.platform !== "win32" || !rootPid) return false;
-  const py = which("python") || which("python3");
-  if (!py) return false;
-
-  const script = [
-    "import ctypes, sys",
-    "from ctypes import wintypes",
-    "root = int(sys.argv[1])",
-    "k32 = ctypes.windll.kernel32",
-    "class PE(ctypes.Structure):",
-    "  _fields_ = [('dwSize',wintypes.DWORD),('cntUsage',wintypes.DWORD),('th32ProcessID',wintypes.DWORD),('th32DefaultHeapID',ctypes.c_size_t),('th32ModuleID',wintypes.DWORD),('cntThreads',wintypes.DWORD),('th32ParentProcessID',wintypes.DWORD),('pcPriClassBase',ctypes.c_long),('dwFlags',wintypes.DWORD),('szExeFile',wintypes.WCHAR*260)]",
-    "snap = k32.CreateToolhelp32Snapshot(2, 0)",
-    "children = {}",
-    "e = PE(); e.dwSize = ctypes.sizeof(PE)",
-    "ok = k32.Process32FirstW(snap, ctypes.byref(e))",
-    "while ok:",
-    "  children.setdefault(int(e.th32ParentProcessID), []).append(int(e.th32ProcessID))",
-    "  ok = k32.Process32NextW(snap, ctypes.byref(e))",
-    "k32.CloseHandle(snap)",
-    "pids, q, seen = [], [root], set()",
-    "while q:",
-    "  p = q.pop(0)",
-    "  if p in seen: continue",
-    "  seen.add(p); pids.append(p)",
-    "  q.extend(children.get(p, ()))",
-    "for p in reversed(pids):",
-    "  h = k32.OpenProcess(1, False, p)",
-    "  if h: k32.TerminateProcess(h, 1); k32.CloseHandle(h)",
-  ].join("\n");
-
-  const res = await runQuick(py, ["-c", script, String(rootPid)], 1500);
+  const cs = `
+using System;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
+public class DevupTreeKill {
+  [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+  public struct PE {
+    public uint dwSize, cntUsage, pid;
+    public UIntPtr heap;
+    public uint mod, thr, ppid;
+    public int pri;
+    public uint flags;
+    [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+    public string exe;
+  }
+  [DllImport("kernel32.dll")] public static extern IntPtr CreateToolhelp32Snapshot(uint f, uint p);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool Process32FirstW(IntPtr s, ref PE e);
+  [DllImport("kernel32.dll", CharSet = CharSet.Unicode)] public static extern bool Process32NextW(IntPtr s, ref PE e);
+  [DllImport("kernel32.dll")] public static extern IntPtr OpenProcess(uint a, bool inh, uint p);
+  [DllImport("kernel32.dll")] public static extern bool TerminateProcess(IntPtr h, uint c);
+  [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+  public static void Kill(uint root) {
+    IntPtr s = CreateToolhelp32Snapshot(2, 0);
+    if (s == IntPtr.Zero || s == new IntPtr(-1)) return;
+    var ch = new Dictionary<uint, List<uint>>();
+    PE e = new PE();
+    e.dwSize = (uint)Marshal.SizeOf(typeof(PE));
+    bool ok = Process32FirstW(s, ref e);
+    while (ok) {
+      if (!ch.ContainsKey(e.ppid)) ch[e.ppid] = new List<uint>();
+      ch[e.ppid].Add(e.pid);
+      ok = Process32NextW(s, ref e);
+    }
+    CloseHandle(s);
+    var pids = new List<uint>();
+    var q = new Queue<uint>();
+    var seen = new HashSet<uint>();
+    q.Enqueue(root);
+    while (q.Count > 0) {
+      uint p = q.Dequeue();
+      if (!seen.Add(p)) continue;
+      pids.Add(p);
+      if (ch.ContainsKey(p)) foreach (uint c in ch[p]) q.Enqueue(c);
+    }
+    for (int i = pids.Count - 1; i >= 0; i--) {
+      IntPtr h = OpenProcess(1, false, pids[i]);
+      if (h != IntPtr.Zero) { TerminateProcess(h, 1); CloseHandle(h); }
+    }
+  }
+}`;
+  const psScript = `Add-Type -TypeDefinition @'\n${cs}\n'@\n[DevupTreeKill]::Kill(${Number(rootPid)})`;
+  const encoded = Buffer.from(psScript, "utf16le").toString("base64");
+  const res = await runQuick(
+    "powershell",
+    ["-NoProfile", "-NoLogo", "-NonInteractive", "-InputFormat", "None", "-EncodedCommand", encoded],
+    15000
+  );
   return res.ok;
 }
 
@@ -244,7 +273,7 @@ export async function terminateManagedProcess(managed, timeoutSeconds, forceImme
           }
         }
       } else {
-        await win32ToolhelpKillTree(managed.pid);
+        await psToolhelpKillTree(managed.pid);
       }
     }
 
