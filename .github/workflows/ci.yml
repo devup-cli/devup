@@ -26,7 +26,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Run unit tests
-        run: python -m unittest discover -s tests -v
+        run: python -W error -m unittest discover -s tests -v
 
       - name: Install package
         run: python -m pip install .
@@ -37,10 +37,10 @@ jobs:
       - name: Verify devup help output
         run: devup --help
 
-      - name: Smoke-test installed CLI on sample project
+      - name: Smoke-test installed CLI and zipapp on sample project
         shell: python
         run: |
-          import json, subprocess, tempfile
+          import json, subprocess, sys, tempfile
           from pathlib import Path
           with tempfile.TemporaryDirectory() as tmp:
               p = Path(tmp)
@@ -48,3 +48,59 @@ jobs:
               out = subprocess.check_output(["devup", "-C", tmp, "list", "--json"], text=True)
               assert "test" in json.loads(out)["tasks"]
               subprocess.check_call(["devup", "-C", tmp, "--dry-run", "test"])
+              pyz = p / "devup.pyz"
+              subprocess.check_call([sys.executable, "scripts/build_zipapp.py", "--output", str(pyz)])
+              ver = subprocess.check_output([sys.executable, str(pyz), "--version"], text=True).strip()
+              assert ver.startswith("devup "), ver
+              pyz_out = subprocess.check_output([sys.executable, str(pyz), "-C", tmp, "list", "--json"], text=True)
+              assert "test" in json.loads(pyz_out)["tasks"]
+
+  packaging-pipx-uvx:
+    name: Verify pip, pipx, and uvx install (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Verify pip, pipx, and uvx installs
+        run: |
+          python -m pip install --upgrade pip pipx uv
+          pipx install .
+          ~/.local/bin/devup --version
+          pipx uninstall devup-cli
+          uvx --from . devup --version
+          uvx --from . devup doctor --json > /dev/null
+
+  packaging-homebrew:
+    name: Verify Homebrew formula install & uninstall (macOS)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, test, and uninstall Homebrew formula
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: "1"
+          HOMEBREW_NO_INSTALL_FROM_API: "1"
+        run: |
+          brew install --formula ./packaging/homebrew/devup-cli.rb
+          devup --version
+          brew test ./packaging/homebrew/devup-cli.rb
+          brew uninstall devup-cli
+
+  packaging-scoop:
+    name: Verify Scoop manifest install & uninstall (Windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install, verify, and uninstall Scoop manifest
+        shell: pwsh
+        run: |
+          if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+            Invoke-Expression "& {$(Invoke-RestMethod -Uri https://get.scoop.sh)} -RunAsAdmin"
+          }
+          $env:PATH = "$env:USERPROFILE\scoop\shims;$env:PATH"
+          scoop bucket add main
+          scoop install ./packaging/scoop/devup.json
+          & "$env:USERPROFILE\scoop\shims\devup.cmd" --version
+          & "$env:USERPROFILE\scoop\shims\devup.cmd" doctor --json | Out-Null
+          scoop uninstall devup

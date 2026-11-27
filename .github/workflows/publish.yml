@@ -31,7 +31,9 @@ jobs:
         run: python -m twine check dist/*
 
       - name: Build zipapp artifact
-        run: python scripts/build_zipapp.py --output dist-zipapp/devup.pyz
+        run: |
+          python scripts/build_zipapp.py --output dist-zipapp/devup.pyz
+          python -c "import hashlib, pathlib; p = pathlib.Path('dist-zipapp/devup.pyz'); h = hashlib.sha256(p.read_bytes()).hexdigest(); pathlib.Path('dist-zipapp/devup.pyz.sha256').write_text(f'{h}  devup.pyz\n')"
 
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
@@ -43,7 +45,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: zipapp
-          path: dist-zipapp/devup.pyz
+          path: dist-zipapp/
 
   publish-pypi:
     name: Publish to PyPI
@@ -81,10 +83,10 @@ jobs:
           name: zipapp
           path: dist-zipapp/
 
-      - name: Upload devup.pyz to release
+      - name: Upload devup.pyz and checksum to release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.ref_name }}" dist-zipapp/devup.pyz --repo "${{ github.repository }}" --clobber
+        run: gh release upload "${{ github.ref_name }}" dist-zipapp/devup.pyz dist-zipapp/devup.pyz.sha256 --repo "${{ github.repository }}" --clobber
 
   verify-pypi:
     name: Post-publication PyPI smoke test

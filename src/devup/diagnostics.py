@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import getpass
 import os
 import platform
 import re
@@ -74,9 +75,33 @@ _TOOL_BINARIES = (
 )
 
 _SENSITIVE_KEY_RE = re.compile(
-    r"(SECRET|TOKEN|KEY|PASS|PWD|AUTH|COOKIE|CREDENTIAL|PRIVATE|CERT)",
+    r"(SECRET|TOKEN|KEY|PASS|PWD|AUTH|COOKIE|CREDENTIAL|PRIVATE|CERT|DSN|DATABASE_URL|CONN_STR)",
     re.IGNORECASE,
 )
+
+# Match scheme://user[:pass]@host (excluding whitespace and quotes)
+_URL_USERINFO_RE = re.compile(
+    r"([A-Za-z][A-Za-z0-9+.-]*://)([^/\s:@\"']+(?::[^/\s@\"']*)?)@"
+)
+
+# Match KEY=VALUE or KEY: VALUE where KEY contains a sensitive word
+_KV_SECRET_RE = re.compile(
+    r"""(\b[A-Za-z0-9_]*(?:SECRET|TOKEN|KEY|PASS|PASSWORD|PWD|AUTH|COOKIE|CREDENTIAL|PRIVATE|DSN|DATABASE_URL)[A-Za-z0-9_]*\s*[=:]\s*)(?:"[^"]*"|'[^']*'|[^\s,;]+)""",
+    re.IGNORECASE,
+)
+
+# Match Bearer / Basic authorization tokens
+_BEARER_RE = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]+", re.IGNORECASE)
+
+# Match sensitive CLI flags like --token xyz, --password=abc, --api-key "xyz"
+_CLI_SECRET_FLAG_RE = re.compile(
+    r"""(--(?:token|password|passwd|secret|api[-_]?key|auth[-_]?token)\s*(?:=|\s)\s*)(?:"[^"]*"|'[^']*'|[^\s]+)""",
+    re.IGNORECASE,
+)
+
+# Match home directories across Windows/macOS/Linux even for arbitrary usernames
+_WIN_USER_DIR_RE = re.compile(r'([A-Za-z]:[\\/]+Users[\\/]+)([^\\/:*?"<>|\s\'"]+)', re.IGNORECASE)
+_POSIX_USER_DIR_RE = re.compile(r"(/(?:Users|home)/)([^/\s'\"\\]+)")
 
 
 @dataclass(slots=True)
@@ -102,20 +127,55 @@ class ValidationReport:
         }
 
 
+def _current_username() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:
+        return os.environ.get("USERNAME") or os.environ.get("USER") or ""
+
+
 def redact_path(path: Path | str) -> str:
-    """Replace the current user's home directory and username with ~ for safe sharing."""
+    """Replace user home directory, OS username segments, and secrets with safe placeholders."""
     text = str(path)
     home = str(Path.home())
-    if home and text.lower().startswith(home.lower()):
-        return "~" + text[len(home) :]
-    return text
+    if home:
+        for variant in (home, home.replace("\\", "/")):
+            if text.lower().startswith(variant.lower()):
+                text = "~" + text[len(variant) :]
+                break
+    return redact_text(text)
 
 
 def redact_text(text: str) -> str:
-    """Redact user home directory paths and username occurrences from a diagnostic string."""
+    """Redact home directories, usernames, URL credentials, and secrets from text."""
     home = str(Path.home())
     if home:
-        text = text.replace(home, "~").replace(home.replace("\\", "/"), "~")
+        for variant in (home, home.replace("\\", "/")):
+            text = re.sub(re.escape(variant), "~", text, flags=re.IGNORECASE)
+
+    text = _WIN_USER_DIR_RE.sub(r"\1<user>", text)
+    text = _POSIX_USER_DIR_RE.sub(r"\1<user>", text)
+
+    username = _current_username()
+    if username and len(username) >= 3:
+        text = re.sub(
+            rf"(?<![A-Za-z0-9_-]){re.escape(username)}(?![A-Za-z0-9_-])",
+            "<user>",
+            text,
+            flags=re.IGNORECASE if os.name == "nt" else 0,
+        )
+
+    text = _URL_USERINFO_RE.sub(r"\1<redacted>@", text)
+    text = _KV_SECRET_RE.sub(r"\1<redacted>", text)
+    text = _BEARER_RE.sub(r"\1 <redacted>", text)
+    text = _CLI_SECRET_FLAG_RE.sub(r"\1<redacted>", text)
+
+    # Scrub literal values of sensitive environment variables if present in errors or commands.
+    for key, val in os.environ.items():
+        if val and len(val) >= 6 and _SENSITIVE_KEY_RE.search(key):
+            if val in text:
+                text = text.replace(val, "<redacted>")
+
     return text
 
 

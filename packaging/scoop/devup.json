@@ -3,15 +3,22 @@
   "description": "Polyglot project script discovery and multi-service parallel runner.",
   "homepage": "https://devup-cli.github.io/devup/",
   "license": "MIT",
+  "notes": "Requires Python 3.11 or newer.",
+  "depends": "python",
   "url": "https://github.com/devup-cli/devup/releases/download/v0.3.0/devup.pyz",
+  "hash": "20e0abcbef15a702eaf2e218c2840531e51add861274f0943ecdfc3c6d154e73",
   "bin": "devup.cmd",
   "pre_install": [
-    "Set-Content -Path \"$dir\\devup.cmd\" -Value '@echo off\r\npython \"%~dp0devup.pyz\" %*' -Encoding Ascii"
+    "if (Get-Command python -ErrorAction SilentlyContinue) { $pyver = python -c \"import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')\"; if ([version]$pyver -lt [version]'3.11') { Write-Warning \"devup requires Python 3.11+ (found $pyver).\" } }",
+    "Set-Content -Path \"$dir\\devup.cmd\" -Value @('@echo off', 'python \"%~dp0devup.pyz\" %*') -Encoding Ascii"
   ],
   "checkver": {
     "github": "https://github.com/devup-cli/devup"
   },
   "autoupdate": {
-    "url": "https://github.com/devup-cli/devup/releases/download/v$version/devup.pyz"
+    "url": "https://github.com/devup-cli/devup/releases/download/v$version/devup.pyz",
+    "hash": {
+      "url": "$url.sha256"
+    }
   }
 }

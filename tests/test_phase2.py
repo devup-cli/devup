@@ -21,7 +21,7 @@ from build_zipapp import build_zipapp
 from bump_version import bump_version
 from devup import __version__
 from devup.cli import _init_devup_toml, main
-from devup.diagnostics import redact_path, run_doctor, validate_workspace
+from devup.diagnostics import redact_path, redact_text, validate_workspace
 from devup.discovery import discover_workspace
 from devup.updates import check_for_update
 
@@ -90,6 +90,81 @@ port = 8000
     def test_redact_path_masks_home_directory(self) -> None:
         sample = Path.home() / "projects" / "demo"
         self.assertTrue(redact_path(sample).startswith("~"))
+
+    def test_doctor_redacts_url_credentials_errors_commands_and_usernames(self) -> None:
+        sample_text = (
+            "ready_url 'ftp://alice:s3cr3tPass@db.internal:5432/app' failed; "
+            "cmd='API_TOKEN=\"tok_live_abc123\" --password=mySecretFlag "
+            "Authorization: Bearer eyJhbGciOiJIUzI1NiJ9.payload.sig'; "
+            r"path=C:\Users\alice\work /home/bob/repo"
+        )
+        scrubbed = redact_text(sample_text)
+        for secret in (
+            "s3cr3tPass",
+            "tok_live_abc123",
+            "mySecretFlag",
+            "eyJhbGciOiJIUzI1NiJ9",
+            "alice",
+            "bob",
+        ):
+            self.assertNotIn(secret, scrubbed)
+        self.assertIn("ftp://<redacted>@db.internal:5432/app", scrubbed)
+        self.assertIn("Bearer <redacted>", scrubbed)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "devup.toml").write_text(
+                """
+[tasks.api]
+command = "curl -H 'Authorization: Bearer topSecretJwt99' https://svc:pw888@internal/health"
+ready_url = "ftp://alice:urlSecret44@bad.internal/health"
+""".strip(),
+                encoding="utf-8",
+            )
+            prev_live = os.environ.get("DEVUP_LIVE_TEST_SECRET")
+            os.environ["DEVUP_LIVE_TEST_SECRET"] = "liveEnvSecret987"
+            try:
+                out = io.StringIO()
+                rc = main(["-C", str(root), "--no-color", "--json", "doctor"], stream=out)
+                self.assertEqual(rc, 1)
+                raw = out.getvalue()
+                for leak in ("urlSecret44", "alice", "liveEnvSecret987", "topSecretJwt99", "pw888"):
+                    self.assertNotIn(leak, raw)
+                payload = json.loads(raw)
+                self.assertFalse(payload["validation"]["valid"])
+                self.assertIn("ftp://<redacted>@bad.internal/health", "\n".join(payload["validation"]["errors"]))
+            finally:
+                if prev_live is None:
+                    os.environ.pop("DEVUP_LIVE_TEST_SECRET", None)
+                else:
+                    os.environ["DEVUP_LIVE_TEST_SECRET"] = prev_live
+
+    def test_update_checks_remain_opt_in_and_offline_safe(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "package.json").write_text(
+                json.dumps({"scripts": {"dev": "vite"}}),
+                encoding="utf-8",
+            )
+            with mock.patch(
+                "devup.updates.urllib.request.urlopen",
+                side_effect=AssertionError("Unexpected network call in offline mode"),
+            ):
+                self.assertEqual(main(["-C", str(root), "--no-color", "list"], stream=io.StringIO()), 0)
+                self.assertEqual(main(["-C", str(root), "--no-color", "validate"], stream=io.StringIO()), 0)
+                self.assertEqual(main(["-C", str(root), "--no-color", "--json", "doctor"], stream=io.StringIO()), 0)
+
+        import urllib.error
+
+        with (
+            mock.patch.dict(os.environ, {}, clear=False),
+            mock.patch(
+                "devup.updates.urllib.request.urlopen",
+                side_effect=urllib.error.URLError("network unreachable"),
+            ),
+        ):
+            os.environ.pop("DEVUP_NO_UPDATE_CHECK", None)
+            self.assertIsNone(check_for_update(__version__, force=True))
 
 
 class CliImprovementsTests(unittest.TestCase):
@@ -206,6 +281,21 @@ class ExamplesAndPackagingTests(unittest.TestCase):
             self.assertTrue(built.is_file())
             ver = subprocess.check_output([sys.executable, str(built), "--version"], text=True).strip()
             self.assertEqual(ver, f"devup {__version__}")
+
+    def test_scoop_manifest_and_homebrew_formula_integrity(self) -> None:
+        scoop_data = json.loads((REPO_ROOT / "packaging" / "scoop" / "devup.json").read_text(encoding="utf-8"))
+        self.assertEqual(scoop_data["version"], __version__)
+        self.assertIn("python", scoop_data["depends"])
+        self.assertIn("3.11+", scoop_data["notes"])
+        self.assertRegex(scoop_data["hash"], r"^[0-9a-f]{64}$")
+        pre_install = "\n".join(scoop_data["pre_install"])
+        self.assertNotIn("\\r\\n", pre_install)
+        self.assertIn("@('@echo off', 'python \"%~dp0devup.pyz\" %*')", pre_install)
+
+        formula = (REPO_ROOT / "packaging" / "homebrew" / "devup-cli.rb").read_text(encoding="utf-8")
+        self.assertIn(f"devup_cli-{__version__}.tar.gz", formula)
+        self.assertIn('depends_on "python@3.12"', formula)
+        self.assertRegex(formula, r'sha256 "[0-9a-f]{64}"')
 
     def test_bump_version_script_updates_files(self) -> None:
         with tempfile.TemporaryDirectory() as td:
