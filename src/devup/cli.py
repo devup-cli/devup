@@ -163,6 +163,38 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Watch files under each task's working directory and auto-restart on changes.",
     )
     parser.add_argument(
+        "--only",
+        action="append",
+        default=[],
+        help="Show logs only for matching service/group name(s) (repeatable or comma-separated).",
+    )
+    parser.add_argument(
+        "--exclude",
+        action="append",
+        default=[],
+        help="Hide logs for matching service/group name(s) (repeatable or comma-separated).",
+    )
+    parser.add_argument(
+        "--buffer",
+        choices=("line", "group"),
+        default="line",
+        help="Log buffering mode: 'line' (stream live) or 'group' (flush per task on completion).",
+    )
+    parser.add_argument(
+        "--save-logs",
+        type=Path,
+        default=None,
+        help="Append plain-text prefixed run logs to a file.",
+    )
+    parser.add_argument(
+        "-v",
+        "--verbose",
+        "--debug",
+        dest="verbose",
+        action="store_true",
+        help="Enable verbose debug logging (also respects DEVUP_DEBUG=1).",
+    )
+    parser.add_argument(
         "--env-file",
         action="append",
         default=[],
@@ -627,6 +659,9 @@ def main(argv: Sequence[str] | None = None, stream: TextIO | None = None) -> int
     _maybe_notify_update(args, out, use_color, command)
 
     if command in ("list", "ls"):
+        if (args.verbose or os.environ.get("DEVUP_DEBUG") in ("1", "true", "yes")) and not args.json:
+            for ev in config.debug_events:
+                out.write(style(f"[devup:debug] {ev}\n", DIM, enabled=use_color))
         return _print_list(config, out, use_color, as_json=args.json)
 
     if command == "init":
@@ -686,6 +721,11 @@ def main(argv: Sequence[str] | None = None, stream: TextIO | None = None) -> int
         port_check=not args.no_port_check,
         strict_ports=True if args.strict_ports else None,
         watch=args.watch,
+        only=list(args.only),
+        exclude=list(args.exclude),
+        buffer_mode=args.buffer,
+        save_logs=args.save_logs,
+        verbose=bool(args.verbose or os.environ.get("DEVUP_DEBUG") in ("1", "true", "yes")),
     )
     try:
         results = run_tasks(config, resolved, options=run_opts, stream=out)

@@ -64,3 +64,5 @@ From lowest to highest priority:
 4. Top-level `[env]` in `devup.toml`
 5. Task-level `env_file` in `[tasks.<name>]`
 6. Task-level `env` in `[tasks.<name>]`
+
+See also: [Manifest Scanners & Discovery](scanners.md) and [Architecture Overview](architecture.md).

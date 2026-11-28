@@ -17,4 +17,5 @@ devup -C examples/fastapi-react --dry-run dev
 - [`maven-multimodule/`](maven-multimodule/README.md) — Maven `<modules>` (`common`, `api`) multi-module workspace.
 - [`gradle-multimodule/`](gradle-multimodule/README.md) — Gradle `settings.gradle.kts` (`:api`, `:worker`) multi-project workspace.
 - [`docker-compose-multiservice/`](docker-compose-multiservice/README.md) — Multi-service `docker-compose.yml` orchestration with health readiness.
+- [`polyglot-microservices/`](polyglot-microservices/README.md) — End-to-end Python + Node.js + Cargo monorepo microservices stack with `.env`, HTTP readiness ordering, and working directories.
 - [`templates/`](templates/) — Reusable `devup.toml` starter templates (also usable via `devup init --template <name>`).

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import os
 import re
+import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -33,6 +35,8 @@ from devup.proc_tree import ManagedProcess, spawn_managed_process, terminate_man
 from devup.readiness import probe_http, probe_tcp
 from devup.watcher import diff_snapshots, snapshot_tree
 
+_SHELL_BUILTINS = frozenset({"echo", "cd", "set", "export", "exit", "true", "false", ":"})
+
 
 @dataclass(slots=True)
 class RunOptions:
@@ -50,10 +54,15 @@ class RunOptions:
     strict_ports: bool | None = None
     watch: bool = False
     watch_interval: float = 0.4
+    only: list[str] = field(default_factory=list)
+    exclude: list[str] = field(default_factory=list)
+    buffer_mode: str = "line"  # "line" | "group"
+    save_logs: Path | None = None
+    verbose: bool = False
 
 
 class _OutputWriter:
-    """Thread-safe log formatter for interleaved subprocess output."""
+    """Thread-safe log formatter for interleaved or grouped subprocess output."""
 
     def __init__(
         self,
@@ -63,6 +72,11 @@ class _OutputWriter:
         use_color: bool,
         timestamps: bool,
         show_prefix: bool,
+        only_services: set[str] | None = None,
+        exclude_services: set[str] | None = None,
+        buffer_mode: str = "line",
+        log_file: TextIO | None = None,
+        verbose: bool = False,
     ) -> None:
         self._stream = stream
         self._colors = service_colors
@@ -70,34 +84,81 @@ class _OutputWriter:
         self._use_color = use_color
         self._timestamps = timestamps
         self._show_prefix = show_prefix
+        self._only = only_services
+        self._exclude = exclude_services or set()
+        self._buffer_mode = buffer_mode
+        self._buffered: dict[str, list[tuple[str, str]]] = {}
+        self._log_file = log_file
+        self._verbose = verbose
         self._lock = threading.Lock()
 
-    def write_line(self, service: str, line: str) -> None:
-        """Emit a single line prefixed with optional timestamp and colored service tag."""
+    def _service_visible(self, service: str) -> bool:
+        if self._only is not None and service not in self._only:
+            return False
+        if service in self._exclude:
+            return False
+        return True
+
+    def _format_service_line(self, service: str, line: str, ts: str | None = None) -> str:
         parts: list[str] = []
         if self._timestamps:
-            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            parts.append(style(ts, DIM, enabled=self._use_color))
+            stamp = ts or datetime.now().strftime("%H:%M:%S.%f")[:-3]
+            parts.append(style(stamp, DIM, enabled=self._use_color))
         if self._show_prefix:
             tag = f"[{service:<{self._pad_width}}]"
             color = self._colors.get(service, "")
             parts.append(style(tag, BOLD, color, enabled=self._use_color and bool(color)))
         prefix = " ".join(parts)
-        formatted = f"{prefix} {line}" if prefix else line
+        return f"{prefix} {line}" if prefix else line
+
+    def _write_log_file_line(self, tag: str, line: str, ts: str) -> None:
+        if self._log_file is not None:
+            self._log_file.write(f"{ts} {tag} {line}\n")
+            self._log_file.flush()
+
+    def write_line(self, service: str, line: str, force_visible: bool = False) -> None:
+        """Emit a single line prefixed with optional timestamp and colored service tag."""
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if self._buffer_mode == "group" and not force_visible:
+            with self._lock:
+                self._write_log_file_line(f"[{service:<{self._pad_width}}]", line, ts)
+                if self._service_visible(service):
+                    self._buffered.setdefault(service, []).append((ts, line))
+            return
+
+        formatted = self._format_service_line(service, line, ts=ts)
         with self._lock:
-            self._stream.write(formatted + "\n")
+            self._write_log_file_line(f"[{service:<{self._pad_width}}]", line, ts)
+            if force_visible or self._service_visible(service):
+                self._stream.write(formatted + "\n")
+                self._stream.flush()
+
+    def flush_service(self, service: str) -> None:
+        """Flush buffered lines for service atomically when using group buffering."""
+        with self._lock:
+            entries = self._buffered.pop(service, [])
+            if not entries:
+                return
+            for ts, line in entries:
+                formatted = self._format_service_line(service, line, ts=ts)
+                self._stream.write(formatted + "\n")
             self._stream.flush()
 
     def write_system(self, message: str, color_code: str = CYAN) -> None:
         """Emit a runner lifecycle status message."""
-        ts_prefix = ""
-        if self._timestamps:
-            ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
-            ts_prefix = style(ts, DIM, enabled=self._use_color) + " "
+        ts = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        ts_prefix = style(ts, DIM, enabled=self._use_color) + " " if self._timestamps else ""
         tag = style("[devup]", BOLD, color_code, enabled=self._use_color)
         with self._lock:
+            self._write_log_file_line("[devup]", message, ts)
             self._stream.write(f"{ts_prefix}{tag} {message}\n")
             self._stream.flush()
+
+    def write_debug(self, message: str) -> None:
+        """Emit a diagnostic debug line when verbose mode is active."""
+        if not self._verbose:
+            return
+        self.write_system(f"[debug] {message}", DIM)
 
 
 def _expand_dependencies(config: WorkspaceConfig, initial_targets: list[str]) -> list[str]:
@@ -177,6 +238,49 @@ def _build_task_env(
     return env, warnings
 
 
+def _expand_filter_names(config: WorkspaceConfig, raw_items: list[str]) -> set[str]:
+    """Expand comma-separated filter names and optional group names into task names."""
+    expanded: set[str] = set()
+    for item in raw_items:
+        for tok in item.split(","):
+            name = tok.strip()
+            if not name:
+                continue
+            if name in config.groups:
+                expanded.update(config.groups[name])
+            else:
+                expanded.add(name)
+    return expanded
+
+
+def _missing_executable_hint(task: Task, root: Path) -> str | None:
+    """Return an actionable hint if a task's lead executable cannot be resolved on PATH."""
+    try:
+        tokens = shlex.split(task.command, posix=(os.name != "nt"))
+    except ValueError:
+        tokens = task.command.split()
+    if not tokens:
+        return None
+    head = tokens[0].strip("\"'")
+    if not head or head.lower() in _SHELL_BUILTINS or "=" in head:
+        return None
+    if os.path.sep in head or "/" in head:
+        target = Path(head) if Path(head).is_absolute() else (Path(task.cwd or root) / head)
+        if not target.exists():
+            return (
+                f"Executable '{head}' not found for task '{task.name}' "
+                f"(command: `{task.command}`, cwd: {task.cwd or root}, repo: {root})."
+            )
+        return None
+    if shutil.which(head) is None:
+        return (
+            f"Executable '{head}' not found on PATH for task '{task.name}' "
+            f"(command: `{task.command}`, repo: {root}). "
+            f"Install '{head}' or run `devup doctor`."
+        )
+    return None
+
+
 def run_tasks(
     config: WorkspaceConfig,
     targets: list[str],
@@ -198,6 +302,14 @@ def run_tasks(
     if not ordered_names:
         return []
 
+    only_set = _expand_filter_names(config, opts.only) if opts.only else None
+    exclude_set = _expand_filter_names(config, opts.exclude) if opts.exclude else set()
+
+    log_handle: TextIO | None = None
+    if opts.save_logs is not None and not opts.dry_run:
+        opts.save_logs.parent.mkdir(parents=True, exist_ok=True)
+        log_handle = opts.save_logs.open("a", encoding="utf-8")
+
     pad_width = min(24, max(len(name) for name in ordered_names))
     colors = assign_service_colors(ordered_names, enabled=use_color)
     writer = _OutputWriter(
@@ -207,6 +319,17 @@ def run_tasks(
         use_color=use_color,
         timestamps=opts.timestamps,
         show_prefix=opts.prefix,
+        only_services=only_set,
+        exclude_services=exclude_set,
+        buffer_mode=opts.buffer_mode,
+        log_file=log_handle,
+        verbose=opts.verbose or os.environ.get("DEVUP_DEBUG") in ("1", "true", "yes"),
+    )
+
+    for ev in config.debug_events:
+        writer.write_debug(ev)
+    writer.write_debug(
+        f"execution plan: targets=[{', '.join(ordered_names)}], buffer={opts.buffer_mode}, fail_fast={fail_fast}"
     )
 
     if opts.dry_run:
@@ -216,15 +339,18 @@ def run_tasks(
             task = config.tasks[name]
             deps_note = f" (after: {', '.join(task.depends_on)})" if task.depends_on else ""
             cwd_note = f" @ {task.cwd or config.root}"
-            writer.write_line(name, f"{task.command}{deps_note}{cwd_note}")
+            writer.write_line(name, f"{task.command}{deps_note}{cwd_note}", force_visible=True)
             results.append(TaskResult(name=name, exit_code=0, duration_seconds=0.0, status="ok"))
         return results
 
     workspace_dotenv, dotenv_warnings = _load_workspace_dotenv(config, opts)
+    if workspace_dotenv:
+        writer.write_debug(f"loaded {len(workspace_dotenv)} env key(s) from root/workspace .env files: {', '.join(sorted(workspace_dotenv))}")
     for warn in dotenv_warnings:
         writer.write_system(warn, YELLOW)
 
     if opts.port_check:
+        writer.write_debug(f"running pre-flight port check across {len(ordered_names)} task(s)")
         conflicts = check_task_ports(config.tasks, ordered_names)
         if conflicts:
             for conflict in conflicts:
@@ -234,6 +360,8 @@ def run_tasks(
                 )
             if strict_ports:
                 conflict_by_task = {c.task_name: c for c in conflicts}
+                if log_handle is not None:
+                    log_handle.close()
                 return [
                     TaskResult(
                         name=name,
@@ -421,7 +549,7 @@ def run_tasks(
                             if pattern.search(cleaned):
                                 pattern_event.set()
                                 maybe_mark_ready()
-                except ValueError:
+                except (ValueError, OSError):
                     pass
 
             def run_network_probe() -> None:
@@ -506,8 +634,8 @@ def run_tasks(
 
             attempt_done.set()
             if probe_thread is not None:
-                probe_thread.join(timeout=1.0)
-            reader.join(timeout=1.0)
+                probe_thread.join(timeout=1.5)
+            reader.join(timeout=2.0)
             if proc.stdout is not None:
                 try:
                     proc.stdout.close()
@@ -529,6 +657,7 @@ def run_tasks(
             duration = time.monotonic() - start
 
             if restart_requested and not stop_event.is_set():
+                writer.flush_service(name)
                 ready_events[name].set()
                 env, _ = _build_task_env(config, task, workspace_dotenv)
                 continue
@@ -546,6 +675,7 @@ def run_tasks(
                 if not is_watched:
                     dep_failed[name] = True
 
+            writer.flush_service(name)
             ready_events[name].set()
             results_map[name] = TaskResult(
                 name=name,
@@ -558,17 +688,27 @@ def run_tasks(
                 writer.write_line(
                     name,
                     style(f"exited with code 0 ({duration:.2f}s)", GREEN, enabled=use_color),
+                    force_visible=True,
                 )
             elif status == "stopped":
                 writer.write_line(
                     name,
                     style(f"stopped ({duration:.2f}s)", YELLOW, enabled=use_color),
+                    force_visible=True,
                 )
             else:
                 writer.write_line(
                     name,
-                    style(f"exited with code {exit_code} ({duration:.2f}s)", RED, enabled=use_color),
+                    style(
+                        f"exited with code {exit_code} ({duration:.2f}s) — cmd: `{task.command}` @ {task.cwd or config.root}",
+                        RED,
+                        enabled=use_color,
+                    ),
+                    force_visible=True,
                 )
+                hint = _missing_executable_hint(task, config.root)
+                if hint:
+                    writer.write_line(name, style(hint, YELLOW, enabled=use_color), force_visible=True)
                 if fail_fast and not is_watched and not stop_event.is_set():
                     stop_all(
                         f"Task '{name}' exited with code {exit_code} — stopping remaining services...",
@@ -619,9 +759,11 @@ def run_tasks(
                 signal.signal(signal.SIGINT, prev_sigint)
             if prev_sigterm is not None and hasattr(signal, "SIGTERM"):
                 signal.signal(signal.SIGTERM, prev_sigterm)
+        ordered_results = [results_map[name] for name in ordered_names if name in results_map]
+        _print_summary(writer, ordered_results, use_color, interrupted_event.is_set())
+        if log_handle is not None:
+            log_handle.close()
 
-    ordered_results = [results_map[name] for name in ordered_names if name in results_map]
-    _print_summary(writer, ordered_results, use_color, interrupted_event.is_set())
     return ordered_results
 
 

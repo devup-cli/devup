@@ -25,6 +25,8 @@ _JUSTFILES = ("justfile", "Justfile", ".justfile")
 _MAKEFILES = ("GNUmakefile", "Makefile", "makefile")
 _GRADLE_FILES = ("build.gradle.kts", "build.gradle")
 _GRADLE_SETTINGS_FILES = ("settings.gradle.kts", "settings.gradle")
+_TASKFILES = ("Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml")
+_MISE_FILES = ("mise.toml", ".mise.toml", ".config/mise.toml")
 
 _MAKE_TARGET_RE = re.compile(r"^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)(?:\s*[^#\n]*)(?:#+\s*(.*))?$")
 _JUST_RECIPE_RE = re.compile(
@@ -91,7 +93,7 @@ def _discover_package_json(
     try:
         data = json.loads(pkg_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        return [], [], [f"Failed to parse {pkg_path}: {exc}"]
+        return [], [], [f"Failed to parse {pkg_path} in repo {root}: {exc}. Check JSON syntax and run `devup doctor`."]
 
     if not isinstance(data, dict):
         return [], [], []
@@ -155,7 +157,7 @@ def _discover_pyproject(
     try:
         data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        return [], [f"Failed to parse {pyproject_path}: {exc}"]
+        return [], [f"Failed to parse {pyproject_path} in repo {directory}: {exc}. Check TOML syntax."]
 
     tasks: list[Task] = []
     seen: set[str] = set()
@@ -470,7 +472,7 @@ def _discover_maven(
     try:
         tree = ET.parse(pom_path)
     except (OSError, ET.ParseError) as exc:
-        return [], [], [f"Failed to parse {pom_path}: {exc}"]
+        return [], [], [f"Failed to parse {pom_path} in repo {root}: {exc}. Check XML syntax."]
 
     xml_root = tree.getroot()
     mvn = _detect_maven_runner(directory, root)
@@ -623,6 +625,309 @@ def _discover_gradle(
     return tasks, subprojects, warnings
 
 
+def _discover_cargo(
+    directory: Path,
+    root: Path,
+    prefix: str = "",
+) -> tuple[list[Task], list[str], list[str]]:
+    """Discover Cargo tasks, binary targets, and [workspace] members from Cargo.toml."""
+    cargo_path = directory / "Cargo.toml"
+    if not cargo_path.is_file():
+        return [], [], []
+
+    try:
+        data = tomllib.loads(cargo_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [], [], [f"Failed to parse {cargo_path} in repo {root}: {exc}"]
+
+    if not isinstance(data, dict):
+        return [], [], []
+
+    tasks: list[Task] = []
+    seen: set[str] = set()
+    members: list[str] = []
+    ws_name = prefix.rstrip(":") or None
+
+    raw_ws = data.get("workspace")
+    if isinstance(raw_ws, dict) and isinstance(raw_ws.get("members"), list):
+        members = [str(m) for m in raw_ws["members"] if isinstance(m, str) and not str(m).startswith("!")]
+
+    def add_task(name: str, cargo_cmd: str, description: str) -> None:
+        full_name = f"{prefix}{name}"
+        if full_name in seen:
+            return
+        seen.add(full_name)
+        tasks.append(
+            Task(
+                name=full_name,
+                command=cargo_cmd,
+                source="Cargo.toml",
+                runner="cargo",
+                description=description,
+                cwd=directory,
+                workspace=ws_name,
+            )
+        )
+
+    pkg = data.get("package") if isinstance(data.get("package"), dict) else None
+    bins = data.get("bin") if isinstance(data.get("bin"), list) else []
+    for entry in bins:
+        if isinstance(entry, dict) and isinstance(entry.get("name"), str) and entry["name"].strip():
+            bname = entry["name"].strip()
+            add_task(f"run:{bname}", f"cargo run --bin {bname}", f"Run Cargo binary '{bname}'")
+
+    if pkg is not None:
+        has_main = (directory / "src" / "main.rs").is_file()
+        has_lib = (directory / "src" / "lib.rs").is_file()
+        if has_main or bins or not has_lib:
+            add_task("run", "cargo run", f"Run Cargo package '{pkg.get('name', directory.name)}'")
+        for sub, desc in (
+            ("build", "Build Cargo package"),
+            ("test", "Run Cargo tests"),
+            ("check", "Type-check Cargo package"),
+            ("clippy", "Run Clippy lints"),
+        ):
+            add_task(sub, f"cargo {sub}", desc)
+    elif raw_ws is not None:
+        for sub, desc in (
+            ("build", "Build Cargo workspace"),
+            ("test", "Run Cargo workspace tests"),
+            ("check", "Check Cargo workspace"),
+        ):
+            add_task(sub, f"cargo {sub} --workspace", desc)
+
+    return tasks, members, []
+
+
+def _parse_go_work_modules(work_path: Path) -> list[str]:
+    """Extract module paths from go.work `use` directives."""
+    try:
+        lines = work_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    modules: list[str] = []
+    in_use = False
+    for raw in lines:
+        line = raw.split("//", 1)[0].strip()
+        if not line:
+            continue
+        if line.startswith("use ("):
+            in_use = True
+            continue
+        if in_use:
+            if line.startswith(")"):
+                in_use = False
+                continue
+            mod = line.strip().strip('"').lstrip("./")
+            if mod and mod not in (".",) and mod not in modules:
+                modules.append(mod)
+        elif line.startswith("use "):
+            mod = line[4:].strip().strip('"').lstrip("./")
+            if mod and mod not in (".",) and mod not in modules:
+                modules.append(mod)
+    return modules
+
+
+def _discover_go(
+    directory: Path,
+    root: Path,
+    prefix: str = "",
+) -> tuple[list[Task], list[str], list[str]]:
+    """Discover Go tasks from go.mod and sub-modules from go.work."""
+    gomod_path = directory / "go.mod"
+    gowork_path = directory / "go.work"
+    work_modules = _parse_go_work_modules(gowork_path) if gowork_path.is_file() else []
+    if not gomod_path.is_file() and not work_modules:
+        return [], [], []
+
+    tasks: list[Task] = []
+    seen: set[str] = set()
+    ws_name = prefix.rstrip(":") or None
+    source_name = "go.mod" if gomod_path.is_file() else "go.work"
+
+    if gomod_path.is_file():
+        try:
+            mod_text = gomod_path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            return [], work_modules, [f"Failed to read {gomod_path} in repo {root}: {exc}"]
+        if "module " not in mod_text:
+            return [], work_modules, [f"Malformed go.mod in repo {root} ({gomod_path}): missing 'module' directive."]
+
+    def add_task(name: str, cmd: str, description: str) -> None:
+        full_name = f"{prefix}{name}"
+        if full_name in seen:
+            return
+        seen.add(full_name)
+        tasks.append(
+            Task(
+                name=full_name,
+                command=cmd,
+                source=source_name,
+                runner="go",
+                description=description,
+                cwd=directory,
+                workspace=ws_name,
+            )
+        )
+
+    cmd_dir = directory / "cmd"
+    has_cmd_bins = False
+    if cmd_dir.is_dir():
+        for child in sorted(cmd_dir.iterdir()):
+            if child.is_dir() and (child / "main.go").is_file():
+                has_cmd_bins = True
+                add_task(f"run:{child.name}", f"go run ./cmd/{child.name}", f"Run Go command './cmd/{child.name}'")
+
+    if (directory / "main.go").is_file() or not has_cmd_bins:
+        add_task("run", "go run .", "Run Go main package")
+
+    for name, go_cmd, desc in (
+        ("build", "go build ./...", "Build Go packages"),
+        ("test", "go test ./...", "Run Go tests"),
+        ("vet", "go vet ./...", "Run go vet static analyzer"),
+    ):
+        add_task(name, go_cmd, desc)
+
+    return tasks, work_modules, []
+
+
+def _parse_taskfile_yaml(text: str) -> dict[str, str]:
+    """Extract public task names -> descriptions from Taskfile YAML without PyYAML."""
+    tasks: dict[str, str] = {}
+    in_tasks = False
+    task_indent: int | None = None
+    current_task: str | None = None
+    prop_indent: int | None = None
+
+    for raw_line in text.splitlines():
+        stripped_comment = raw_line.split("#", 1)[0].rstrip()
+        if not stripped_comment.strip():
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        stripped = stripped_comment.strip()
+
+        if indent == 0:
+            if stripped == "tasks:" or stripped.startswith("tasks:"):
+                in_tasks = True
+                task_indent = None
+                current_task = None
+                prop_indent = None
+            else:
+                in_tasks = False
+                current_task = None
+            continue
+
+        if not in_tasks:
+            continue
+
+        if task_indent is None:
+            task_indent = indent
+
+        if indent == task_indent and ":" in stripped and not stripped.startswith("-"):
+            key = stripped.split(":", 1)[0].strip().strip("\"'")
+            current_task = key if key else None
+            prop_indent = None
+            if current_task and current_task not in tasks:
+                tasks[current_task] = ""
+            continue
+
+        if current_task is not None and indent > task_indent:
+            if prop_indent is None:
+                prop_indent = indent
+            if indent == prop_indent:
+                if stripped.startswith(("desc:", "summary:")):
+                    val = stripped.split(":", 1)[1].strip().strip("\"'")
+                    if val and not tasks[current_task]:
+                        tasks[current_task] = val
+                elif stripped.startswith("internal:") and stripped.split(":", 1)[1].strip().lower() == "true":
+                    tasks.pop(current_task, None)
+                    current_task = None
+
+    return tasks
+
+
+def _discover_taskfile(directory: Path, root: Path, prefix: str = "") -> tuple[list[Task], list[str]]:
+    """Discover tasks from Taskfile.yml / Taskfile.yaml."""
+    taskfile_path = next((directory / name for name in _TASKFILES if (directory / name).is_file()), None)
+    if taskfile_path is None:
+        return [], []
+
+    try:
+        content = taskfile_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        return [], [f"Failed to read {taskfile_path} in repo {root}: {exc}"]
+
+    parsed = _parse_taskfile_yaml(content)
+    tasks: list[Task] = []
+    ws_name = prefix.rstrip(":") or None
+    for name, desc in parsed.items():
+        tasks.append(
+            Task(
+                name=f"{prefix}{name}",
+                command=f"task {name}",
+                source=taskfile_path.name,
+                runner="task",
+                description=desc,
+                cwd=directory,
+                workspace=ws_name,
+            )
+        )
+    return tasks, []
+
+
+def _discover_mise(directory: Path, root: Path, prefix: str = "") -> tuple[list[Task], list[str]]:
+    """Discover tasks from mise.toml / .mise.toml / .config/mise.toml."""
+    mise_path = next((directory / name for name in _MISE_FILES if (directory / name).is_file()), None)
+    if mise_path is None:
+        return [], []
+
+    try:
+        data = tomllib.loads(mise_path.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return [], [f"Failed to parse {mise_path} in repo {root}: {exc}"]
+
+    if not isinstance(data, dict):
+        return [], []
+
+    raw_tasks = data.get("tasks")
+    if not isinstance(raw_tasks, dict):
+        return [], []
+
+    tasks: list[Task] = []
+    ws_name = prefix.rstrip(":") or None
+    for name, entry in raw_tasks.items():
+        if not isinstance(name, str) or name.startswith("_"):
+            continue
+        desc = ""
+        if isinstance(entry, str):
+            desc = entry.strip()
+        elif isinstance(entry, dict):
+            if entry.get("hide") is True:
+                continue
+            if isinstance(entry.get("description"), str) and entry["description"].strip():
+                desc = entry["description"].strip()
+            elif isinstance(entry.get("run"), str):
+                desc = entry["run"].strip()
+            elif isinstance(entry.get("run"), list):
+                desc = " && ".join(str(x) for x in entry["run"])
+        else:
+            continue
+
+        tasks.append(
+            Task(
+                name=f"{prefix}{name}",
+                command=f"mise run {name}",
+                source=mise_path.name if mise_path.parent == directory else ".config/mise.toml",
+                runner="mise",
+                description=desc,
+                cwd=directory,
+                workspace=ws_name,
+            )
+        )
+
+    return tasks, []
+
+
 def _resolve_workspace_dirs(root: Path, patterns: list[str]) -> list[Path]:
     """Expand workspace glob patterns into sorted unique subdirectories."""
     dirs: list[Path] = []
@@ -646,45 +951,94 @@ def _discover_directory(
     tasks: dict[str, Task],
     warnings: list[str],
     prefix: str = "",
+    debug_events: list[str] | None = None,
 ) -> list[str]:
     """Run all manifest scanners in priority order on a single directory."""
     discovered_workspaces: list[str] = []
 
+    def _log(msg: str) -> None:
+        if debug_events is not None:
+            debug_events.append(msg)
+
     pkg_tasks, pkg_workspaces, pkg_warnings = _discover_package_json(directory, root, prefix=prefix)
     warnings.extend(pkg_warnings)
     discovered_workspaces.extend(pkg_workspaces)
+    if pkg_tasks:
+        _log(f"discovery: {directory / 'package.json'} -> {len(pkg_tasks)} task(s) via {pkg_tasks[0].runner}")
     for task in pkg_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}node")
 
     py_tasks, py_warnings = _discover_pyproject(directory, prefix=prefix)
     warnings.extend(py_warnings)
+    if py_tasks:
+        _log(f"discovery: {directory / 'pyproject.toml'} -> {len(py_tasks)} task(s)")
     for task in py_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}py")
+
+    cargo_tasks, cargo_members, cargo_warnings = _discover_cargo(directory, root, prefix=prefix)
+    warnings.extend(cargo_warnings)
+    discovered_workspaces.extend(cargo_members)
+    if cargo_tasks:
+        _log(f"discovery: {directory / 'Cargo.toml'} -> {len(cargo_tasks)} task(s)")
+    for task in cargo_tasks:
+        _register_task(tasks, task, qualifier=f"{prefix}cargo")
+
+    go_tasks, go_modules, go_warnings = _discover_go(directory, root, prefix=prefix)
+    warnings.extend(go_warnings)
+    discovered_workspaces.extend(go_modules)
+    if go_tasks:
+        _log(f"discovery: {directory} (Go) -> {len(go_tasks)} task(s)")
+    for task in go_tasks:
+        _register_task(tasks, task, qualifier=f"{prefix}go")
 
     mvn_tasks, mvn_modules, mvn_warnings = _discover_maven(directory, root, prefix=prefix)
     warnings.extend(mvn_warnings)
     discovered_workspaces.extend(mvn_modules)
+    if mvn_tasks:
+        _log(f"discovery: {directory / 'pom.xml'} -> {len(mvn_tasks)} task(s)")
     for task in mvn_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}mvn")
 
     gradle_tasks, gradle_subs, gradle_warnings = _discover_gradle(directory, root, prefix=prefix)
     warnings.extend(gradle_warnings)
     discovered_workspaces.extend(gradle_subs)
+    if gradle_tasks:
+        _log(f"discovery: {directory} (Gradle) -> {len(gradle_tasks)} task(s)")
     for task in gradle_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}gradle")
 
+    taskfile_tasks, taskfile_warnings = _discover_taskfile(directory, root, prefix=prefix)
+    warnings.extend(taskfile_warnings)
+    if taskfile_tasks:
+        _log(f"discovery: {directory} ({taskfile_tasks[0].source}) -> {len(taskfile_tasks)} task(s)")
+    for task in taskfile_tasks:
+        _register_task(tasks, task, qualifier=f"{prefix}task")
+
+    mise_tasks, mise_warnings = _discover_mise(directory, root, prefix=prefix)
+    warnings.extend(mise_warnings)
+    if mise_tasks:
+        _log(f"discovery: {directory} ({mise_tasks[0].source}) -> {len(mise_tasks)} task(s)")
+    for task in mise_tasks:
+        _register_task(tasks, task, qualifier=f"{prefix}mise")
+
     just_tasks, just_warnings = _discover_justfile(directory, prefix=prefix)
     warnings.extend(just_warnings)
+    if just_tasks:
+        _log(f"discovery: {directory} ({just_tasks[0].source}) -> {len(just_tasks)} task(s)")
     for task in just_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}just")
 
     make_tasks, make_warnings = _discover_makefile(directory, prefix=prefix)
     warnings.extend(make_warnings)
+    if make_tasks:
+        _log(f"discovery: {directory} ({make_tasks[0].source}) -> {len(make_tasks)} task(s)")
     for task in make_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}make")
 
     compose_tasks, compose_warnings = _discover_compose(directory, prefix=prefix)
     warnings.extend(compose_warnings)
+    if compose_tasks:
+        _log(f"discovery: {directory} ({compose_tasks[0].source}) -> {len(compose_tasks)} task(s)")
     for task in compose_tasks:
         _register_task(tasks, task, qualifier=f"{prefix}compose")
 
@@ -700,7 +1054,9 @@ def _load_devup_toml(root: Path, config: WorkspaceConfig) -> list[str]:
     try:
         data = tomllib.loads(toml_path.read_text(encoding="utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as exc:
-        config.warnings.append(f"Failed to parse {toml_path}: {exc}")
+        config.warnings.append(
+            f"Failed to parse {toml_path} in repo {root}: {exc}. Run `devup validate` to inspect configuration errors."
+        )
         return []
 
     if not isinstance(data, dict):
@@ -850,6 +1206,7 @@ def discover_workspace(root: Path, scan_workspaces: bool = True) -> WorkspaceCon
     """Discover tasks and groups for a project root and its configured workspaces."""
     resolved_root = root.resolve()
     config = WorkspaceConfig(root=resolved_root)
+    config.debug_events.append(f"discovery: scanning repository root {resolved_root}")
 
     # First discover manifests at root, then apply devup.toml overrides on top.
     pkg_workspaces = _discover_directory(
@@ -857,6 +1214,7 @@ def discover_workspace(root: Path, scan_workspaces: bool = True) -> WorkspaceCon
         resolved_root,
         config.tasks,
         config.warnings,
+        debug_events=config.debug_events,
     )
     toml_workspaces = _load_devup_toml(resolved_root, config)
 
@@ -864,12 +1222,14 @@ def discover_workspace(root: Path, scan_workspaces: bool = True) -> WorkspaceCon
         workspace_globs = toml_workspaces or pkg_workspaces
         for ws_dir in _resolve_workspace_dirs(resolved_root, workspace_globs):
             ws_name = ws_dir.name
+            config.debug_events.append(f"discovery: scanning workspace '{ws_name}' at {ws_dir}")
             _discover_directory(
                 ws_dir,
                 resolved_root,
                 config.tasks,
                 config.warnings,
                 prefix=f"{ws_name}:",
+                debug_events=config.debug_events,
             )
             # Re-apply devup.toml so root explicit tasks always win over workspace collisions.
         if toml_workspaces or pkg_workspaces:

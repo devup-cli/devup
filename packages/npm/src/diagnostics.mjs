@@ -59,6 +59,10 @@ const TOOL_BINARIES = [
   "java",
   "mvn",
   "gradle",
+  "cargo",
+  "go",
+  "task",
+  "mise",
 ];
 
 const SENSITIVE_KEY_RE =

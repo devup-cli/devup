@@ -128,6 +128,11 @@ options:
   --keep-going          Keep other services running if one exits with a non-zero status.
   --dry-run             Show the resolved execution plan without starting processes.
   -w, --watch           Watch files under each task's working directory and auto-restart on changes.
+  --only TARGET         Show logs only for matching service/group name(s) (repeatable/comma-separated).
+  --exclude TARGET      Hide logs for matching service/group name(s) (repeatable/comma-separated).
+  --buffer MODE         Log buffering mode: line or group (default: line).
+  --save-logs FILE      Append plain-text prefixed run logs to a file.
+  -v, --verbose         Enable verbose debug logging (also respects DEVUP_DEBUG=1).
   --env-file ENV_FILE   Load additional .env file(s) before starting tasks (can be repeated).
   --no-dotenv           Disable automatic loading of .env in the project root.
   --no-port-check       Skip pre-flight port availability checks.
@@ -156,6 +161,11 @@ export function parseCliArgs(argv) {
     keepGoing: false,
     dryRun: false,
     watch: false,
+    only: [],
+    exclude: [],
+    buffer: "line",
+    saveLogs: null,
+    verbose: false,
     envFile: [],
     noDotenv: false,
     noPortCheck: false,
@@ -235,6 +245,28 @@ export function parseCliArgs(argv) {
       case "--watch":
         args.watch = true;
         break;
+      case "--only":
+        args.only.push(readValue(flag));
+        break;
+      case "--exclude":
+        args.exclude.push(readValue(flag));
+        break;
+      case "--buffer": {
+        const val = readValue(flag);
+        if (val !== "line" && val !== "group") {
+          throw new Error(`invalid choice '${val}' for --buffer (choose from line, group)`);
+        }
+        args.buffer = val;
+        break;
+      }
+      case "--save-logs":
+        args.saveLogs = readValue(flag);
+        break;
+      case "-v":
+      case "--verbose":
+      case "--debug":
+        args.verbose = true;
+        break;
       case "--env-file":
         args.envFile.push(readValue(flag));
         break;
@@ -287,12 +319,13 @@ export function parseCliArgs(argv) {
       default:
         if (flag.startsWith("-C") && flag.length > 2 && inlineVal === null) {
           args.cwd = flag.slice(2);
-        } else if (/^-[wtVh]+$/.test(flag) && inlineVal === null) {
+        } else if (/^-[wtVhv]+$/.test(flag) && inlineVal === null) {
           for (const ch of flag.slice(1)) {
             if (ch === "w") args.watch = true;
             else if (ch === "t") args.timestamps = true;
             else if (ch === "V") args.version = true;
             else if (ch === "h") args.help = true;
+            else if (ch === "v") args.verbose = true;
           }
         } else {
           throw new Error(`unrecognized argument: ${token}`);
@@ -706,6 +739,13 @@ export async function main(argv = process.argv.slice(2), io = {}) {
   await maybeNotifyUpdate(args, out, useColor, command);
 
   if (command === "list" || command === "ls") {
+    const debugEnv = String(process.env.DEVUP_DEBUG || "").toLowerCase();
+    const verbose = Boolean(args.verbose || debugEnv === "1" || debugEnv === "true" || debugEnv === "yes");
+    if (verbose && !args.json) {
+      for (const ev of config.debugEvents || []) {
+        out.write(style(`[devup:debug] ${ev}\n`, DIM, { enabled: useColor }));
+      }
+    }
     return printList(config, out, useColor, args.json);
   }
 
@@ -768,6 +808,7 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     return 2;
   }
 
+  const debugEnv = String(process.env.DEVUP_DEBUG || "").toLowerCase();
   const runOpts = {
     failFast: args.keepGoing ? false : null,
     timestamps: args.timestamps,
@@ -779,6 +820,11 @@ export async function main(argv = process.argv.slice(2), io = {}) {
     portCheck: !args.noPortCheck,
     strictPorts: args.strictPorts ? true : null,
     watch: args.watch,
+    only: [...args.only],
+    exclude: [...args.exclude],
+    bufferMode: args.buffer,
+    saveLogs: args.saveLogs,
+    verbose: Boolean(args.verbose || debugEnv === "1" || debugEnv === "true" || debugEnv === "yes"),
   };
 
   let results;

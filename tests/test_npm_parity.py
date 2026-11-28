@@ -59,7 +59,7 @@ class NpmParityAndConflictsTests(unittest.TestCase):
         project_dirs = [
             d for d in sorted(examples_dir.iterdir()) if d.is_dir() and d.name != "templates"
         ]
-        self.assertEqual(len(project_dirs), 7)
+        self.assertGreaterEqual(len(project_dirs), 8)
 
         for proj_dir in project_dirs:
             with self.subTest(example=proj_dir.name):

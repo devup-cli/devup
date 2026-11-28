@@ -1,0 +1,33 @@
+default = ["dev"]
+fail_fast = true
+auto_env = true
+workspaces = ["services/*"]
+
+[env]
+SHARED_MODE = "microservices"
+
+[groups]
+dev = ["auth", "worker", "gateway"]
+
+[tasks.auth]
+description = "Python HTTP auth service"
+command = "python server.py"
+cwd = "services/auth"
+port = 18081
+ready_url = "http://127.0.0.1:18081/health"
+ready_timeout = 15
+
+[tasks.worker]
+description = "Background polyglot worker"
+command = "node worker.mjs"
+cwd = "services/worker"
+
+[tasks.gateway]
+description = "Node.js API gateway"
+command = "node server.mjs"
+cwd = "services/gateway"
+env_file = ".env.gateway"
+port = 18082
+depends_on = ["auth", "worker"]
+ready_url = "http://127.0.0.1:18082/status"
+ready_timeout = 15

@@ -1,7 +1,7 @@
-import { readFileSync, realpathSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { basename, join, relative, resolve } from "node:path";
 
-import { expandGlobDirs, isFile, which } from "./fs_utils.mjs";
+import { expandGlobDirs, isDir, isFile, which } from "./fs_utils.mjs";
 import { createTask, createWorkspaceConfig } from "./models.mjs";
 import { normalizeTcpTarget, validateReadyUrl } from "./readiness.mjs";
 import { parseToml } from "./toml.mjs";
@@ -12,6 +12,8 @@ const JUSTFILES = ["justfile", "Justfile", ".justfile"];
 const MAKEFILES = ["GNUmakefile", "Makefile", "makefile"];
 const GRADLE_FILES = ["build.gradle.kts", "build.gradle"];
 const GRADLE_SETTINGS_FILES = ["settings.gradle.kts", "settings.gradle"];
+const TASKFILES = ["Taskfile.yml", "Taskfile.yaml", "taskfile.yml", "taskfile.yaml"];
+const MISE_FILES = ["mise.toml", ".mise.toml", ".config/mise.toml"];
 
 const MAKE_TARGET_RE = /^([A-Za-z0-9][A-Za-z0-9_.-]*)\s*:(?!=)(?:\s*[^#\n]*)(?:#+\s*(.*))?$/;
 const JUST_RECIPE_RE = /^@?([A-Za-z][A-Za-z0-9_-]*)(?:\s+[^:=\n]+?)?\s*:\s*(?:#\s*(.*))?$/;
@@ -609,6 +611,350 @@ function discoverGradle(directory, root, prefix = "") {
   return { tasks, subprojects, warnings: [] };
 }
 
+function discoverCargo(directory, root, prefix = "") {
+  const cargoPath = join(directory, "Cargo.toml");
+  if (!isFile(cargoPath)) return { tasks: [], members: [], warnings: [] };
+
+  let data;
+  try {
+    data = parseToml(readFileSync(cargoPath, "utf8"));
+  } catch (err) {
+    return {
+      tasks: [],
+      members: [],
+      warnings: [`Failed to parse ${cargoPath} in repo ${root}: ${err.message}`],
+    };
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) {
+    return { tasks: [], members: [], warnings: [] };
+  }
+
+  const tasks = [];
+  const seen = new Set();
+  const wsName = prefix ? prefix.replace(/:+$/, "") : null;
+  const rawWs = data.workspace && typeof data.workspace === "object" ? data.workspace : null;
+  const members =
+    rawWs && Array.isArray(rawWs.members)
+      ? rawWs.members.map(String).filter((m) => !m.startsWith("!"))
+      : [];
+
+  function addTask(name, cargoCmd, description) {
+    const fullName = `${prefix}${name}`;
+    if (seen.has(fullName)) return;
+    seen.add(fullName);
+    tasks.push(
+      createTask({
+        name: fullName,
+        command: cargoCmd,
+        source: "Cargo.toml",
+        runner: "cargo",
+        description,
+        cwd: directory,
+        workspace: wsName,
+      })
+    );
+  }
+
+  const pkg = data.package && typeof data.package === "object" ? data.package : null;
+  const bins = Array.isArray(data.bin) ? data.bin : [];
+  for (const entry of bins) {
+    if (entry && typeof entry === "object" && typeof entry.name === "string" && entry.name.trim()) {
+      const bname = entry.name.trim();
+      addTask(`run:${bname}`, `cargo run --bin ${bname}`, `Run Cargo binary '${bname}'`);
+    }
+  }
+
+  if (pkg) {
+    const hasMain = isFile(join(directory, "src", "main.rs"));
+    const hasLib = isFile(join(directory, "src", "lib.rs"));
+    if (hasMain || bins.length > 0 || !hasLib) {
+      addTask("run", "cargo run", `Run Cargo package '${pkg.name || basename(directory)}'`);
+    }
+    for (const [sub, desc] of [
+      ["build", "Build Cargo package"],
+      ["test", "Run Cargo tests"],
+      ["check", "Type-check Cargo package"],
+      ["clippy", "Run Clippy lints"],
+    ]) {
+      addTask(sub, `cargo ${sub}`, desc);
+    }
+  } else if (rawWs) {
+    for (const [sub, desc] of [
+      ["build", "Build Cargo workspace"],
+      ["test", "Run Cargo workspace tests"],
+      ["check", "Check Cargo workspace"],
+    ]) {
+      addTask(sub, `cargo ${sub} --workspace`, desc);
+    }
+  }
+
+  return { tasks, members, warnings: [] };
+}
+
+function parseGoWorkModules(workPath) {
+  let lines;
+  try {
+    lines = readFileSync(workPath, "utf8").split(/\r?\n/);
+  } catch {
+    return [];
+  }
+  const modules = [];
+  let inUse = false;
+  for (const raw of lines) {
+    const line = raw.split("//", 1)[0].trim();
+    if (!line) continue;
+    if (line.startsWith("use (")) {
+      inUse = true;
+      continue;
+    }
+    if (inUse) {
+      if (line.startsWith(")")) {
+        inUse = false;
+        continue;
+      }
+      const mod = line.trim().replace(/^"|"$/g, "").replace(/^\.\//, "");
+      if (mod && mod !== "." && !modules.includes(mod)) modules.push(mod);
+    } else if (line.startsWith("use ")) {
+      const mod = line.slice(4).trim().replace(/^"|"$/g, "").replace(/^\.\//, "");
+      if (mod && mod !== "." && !modules.includes(mod)) modules.push(mod);
+    }
+  }
+  return modules;
+}
+
+function discoverGo(directory, root, prefix = "") {
+  const gomodPath = join(directory, "go.mod");
+  const goworkPath = join(directory, "go.work");
+  const hasGomod = isFile(gomodPath);
+  const workModules = isFile(goworkPath) ? parseGoWorkModules(goworkPath) : [];
+  if (!hasGomod && workModules.length === 0) return { tasks: [], modules: [], warnings: [] };
+
+  const sourceName = hasGomod ? "go.mod" : "go.work";
+  if (hasGomod) {
+    let modText;
+    try {
+      modText = readFileSync(gomodPath, "utf8");
+    } catch (err) {
+      return {
+        tasks: [],
+        modules: workModules,
+        warnings: [`Failed to read ${gomodPath} in repo ${root}: ${err.message}`],
+      };
+    }
+    if (!modText.includes("module ")) {
+      return {
+        tasks: [],
+        modules: workModules,
+        warnings: [`Malformed go.mod in repo ${root} (${gomodPath}): missing 'module' directive.`],
+      };
+    }
+  }
+
+  const tasks = [];
+  const seen = new Set();
+  const wsName = prefix ? prefix.replace(/:+$/, "") : null;
+
+  function addTask(name, cmd, description) {
+    const fullName = `${prefix}${name}`;
+    if (seen.has(fullName)) return;
+    seen.add(fullName);
+    tasks.push(
+      createTask({
+        name: fullName,
+        command: cmd,
+        source: sourceName,
+        runner: "go",
+        description,
+        cwd: directory,
+        workspace: wsName,
+      })
+    );
+  }
+
+  const cmdDir = join(directory, "cmd");
+  let hasCmdBins = false;
+  if (isDir(cmdDir)) {
+    let entries = [];
+    try {
+      entries = readdirSync(cmdDir, { withFileTypes: true }).sort((a, b) =>
+        a.name.localeCompare(b.name)
+      );
+    } catch {
+      entries = [];
+    }
+    for (const child of entries) {
+      if (child.isDirectory() && isFile(join(cmdDir, child.name, "main.go"))) {
+        hasCmdBins = true;
+        addTask(`run:${child.name}`, `go run ./cmd/${child.name}`, `Run Go command './cmd/${child.name}'`);
+      }
+    }
+  }
+
+  if (isFile(join(directory, "main.go")) || !hasCmdBins) {
+    addTask("run", "go run .", "Run Go main package");
+  }
+
+  for (const [name, goCmd, desc] of [
+    ["build", "go build ./...", "Build Go packages"],
+    ["test", "go test ./...", "Run Go tests"],
+    ["vet", "go vet ./...", "Run go vet static analyzer"],
+  ]) {
+    addTask(name, goCmd, desc);
+  }
+
+  return { tasks, modules: workModules, warnings: [] };
+}
+
+function parseTaskfileYaml(text) {
+  const tasks = new Map();
+  let inTasks = false;
+  let taskIndent = null;
+  let currentTask = null;
+  let propIndent = null;
+
+  for (const rawLine of text.split(/\r?\n/)) {
+    const strippedComment = rawLine.split("#", 1)[0].trimEnd();
+    if (!strippedComment.trim()) continue;
+    const indent = rawLine.length - rawLine.trimStart().length;
+    const stripped = strippedComment.trim();
+
+    if (indent === 0) {
+      if (stripped === "tasks:" || stripped.startsWith("tasks:")) {
+        inTasks = true;
+        taskIndent = null;
+        currentTask = null;
+        propIndent = null;
+      } else {
+        inTasks = false;
+        currentTask = null;
+      }
+      continue;
+    }
+
+    if (!inTasks) continue;
+    if (taskIndent === null) taskIndent = indent;
+
+    if (indent === taskIndent && stripped.includes(":") && !stripped.startsWith("-")) {
+      const key = stripped.split(":", 1)[0].trim().replace(/^["']|["']$/g, "");
+      currentTask = key || null;
+      propIndent = null;
+      if (currentTask && !tasks.has(currentTask)) {
+        tasks.set(currentTask, "");
+      }
+      continue;
+    }
+
+    if (currentTask !== null && indent > taskIndent) {
+      if (propIndent === null) propIndent = indent;
+      if (indent === propIndent) {
+        if (stripped.startsWith("desc:") || stripped.startsWith("summary:")) {
+          const idx = stripped.indexOf(":");
+          const val = stripped.slice(idx + 1).trim().replace(/^["']|["']$/g, "");
+          if (val && !tasks.get(currentTask)) tasks.set(currentTask, val);
+        } else if (stripped.startsWith("internal:")) {
+          const val = stripped.slice(stripped.indexOf(":") + 1).trim().toLowerCase();
+          if (val === "true") {
+            tasks.delete(currentTask);
+            currentTask = null;
+          }
+        }
+      }
+    }
+  }
+  return tasks;
+}
+
+function discoverTaskfile(directory, root, prefix = "") {
+  const taskfileName = TASKFILES.find((n) => isFile(join(directory, n)));
+  if (!taskfileName) return { tasks: [], warnings: [] };
+  const taskfilePath = join(directory, taskfileName);
+
+  let content;
+  try {
+    content = readFileSync(taskfilePath, "utf8");
+  } catch (err) {
+    return {
+      tasks: [],
+      warnings: [`Failed to read ${taskfilePath} in repo ${root}: ${err.message}`],
+    };
+  }
+
+  const parsed = parseTaskfileYaml(content);
+  const tasks = [];
+  const wsName = prefix ? prefix.replace(/:+$/, "") : null;
+  for (const [name, desc] of parsed.entries()) {
+    tasks.push(
+      createTask({
+        name: `${prefix}${name}`,
+        command: `task ${name}`,
+        source: taskfileName,
+        runner: "task",
+        description: desc,
+        cwd: directory,
+        workspace: wsName,
+      })
+    );
+  }
+  return { tasks, warnings: [] };
+}
+
+function discoverMise(directory, root, prefix = "") {
+  const miseRel = MISE_FILES.find((n) => isFile(join(directory, n)));
+  if (!miseRel) return { tasks: [], warnings: [] };
+  const misePath = join(directory, miseRel);
+
+  let data;
+  try {
+    data = parseToml(readFileSync(misePath, "utf8"));
+  } catch (err) {
+    return {
+      tasks: [],
+      warnings: [`Failed to parse ${misePath} in repo ${root}: ${err.message}`],
+    };
+  }
+
+  if (!data || typeof data !== "object" || Array.isArray(data)) return { tasks: [], warnings: [] };
+  const rawTasks = data.tasks;
+  if (!rawTasks || typeof rawTasks !== "object" || Array.isArray(rawTasks)) {
+    return { tasks: [], warnings: [] };
+  }
+
+  const tasks = [];
+  const wsName = prefix ? prefix.replace(/:+$/, "") : null;
+  for (const [name, entry] of Object.entries(rawTasks)) {
+    if (name.startsWith("_")) continue;
+    let desc = "";
+    if (typeof entry === "string") {
+      desc = entry.trim();
+    } else if (entry && typeof entry === "object" && !Array.isArray(entry)) {
+      if (entry.hide === true) continue;
+      if (typeof entry.description === "string" && entry.description.trim()) {
+        desc = entry.description.trim();
+      } else if (typeof entry.run === "string") {
+        desc = entry.run.trim();
+      } else if (Array.isArray(entry.run)) {
+        desc = entry.run.map(String).join(" && ");
+      }
+    } else {
+      continue;
+    }
+
+    tasks.push(
+      createTask({
+        name: `${prefix}${name}`,
+        command: `mise run ${name}`,
+        source: miseRel,
+        runner: "mise",
+        description: desc,
+        cwd: directory,
+        workspace: wsName,
+      })
+    );
+  }
+  return { tasks, warnings: [] };
+}
+
 function resolveWorkspaceDirs(root, patterns) {
   const dirs = [];
   const seen = new Set();
@@ -627,38 +973,70 @@ function resolveWorkspaceDirs(root, patterns) {
   return dirs;
 }
 
-function discoverDirectory(directory, root, tasks, warnings, prefix = "") {
+function discoverDirectory(directory, root, tasks, warnings, prefix = "", debugEvents = null) {
   const discoveredWorkspaces = [];
+  const log = (msg) => {
+    if (debugEvents) debugEvents.push(msg);
+  };
 
   const pkg = discoverPackageJson(directory, root, prefix);
   warnings.push(...pkg.warnings);
   discoveredWorkspaces.push(...pkg.workspaces);
+  if (pkg.tasks.length > 0) log(`discovery: ${join(directory, "package.json")} -> ${pkg.tasks.length} task(s)`);
   for (const task of pkg.tasks) registerTask(tasks, task, `${prefix}node`);
 
   const py = discoverPyproject(directory, prefix);
   warnings.push(...py.warnings);
+  if (py.tasks.length > 0) log(`discovery: ${join(directory, "pyproject.toml")} -> ${py.tasks.length} task(s)`);
   for (const task of py.tasks) registerTask(tasks, task, `${prefix}py`);
+
+  const crg = discoverCargo(directory, root, prefix);
+  warnings.push(...crg.warnings);
+  discoveredWorkspaces.push(...crg.members);
+  if (crg.tasks.length > 0) log(`discovery: ${join(directory, "Cargo.toml")} -> ${crg.tasks.length} task(s)`);
+  for (const task of crg.tasks) registerTask(tasks, task, `${prefix}cargo`);
+
+  const go = discoverGo(directory, root, prefix);
+  warnings.push(...go.warnings);
+  discoveredWorkspaces.push(...go.modules);
+  if (go.tasks.length > 0) log(`discovery: ${directory} (Go) -> ${go.tasks.length} task(s)`);
+  for (const task of go.tasks) registerTask(tasks, task, `${prefix}go`);
 
   const mvn = discoverMaven(directory, root, prefix);
   warnings.push(...mvn.warnings);
   discoveredWorkspaces.push(...mvn.modules);
+  if (mvn.tasks.length > 0) log(`discovery: ${join(directory, "pom.xml")} -> ${mvn.tasks.length} task(s)`);
   for (const task of mvn.tasks) registerTask(tasks, task, `${prefix}mvn`);
 
   const grad = discoverGradle(directory, root, prefix);
   warnings.push(...grad.warnings);
   discoveredWorkspaces.push(...grad.subprojects);
+  if (grad.tasks.length > 0) log(`discovery: ${directory} (Gradle) -> ${grad.tasks.length} task(s)`);
   for (const task of grad.tasks) registerTask(tasks, task, `${prefix}gradle`);
+
+  const tsk = discoverTaskfile(directory, root, prefix);
+  warnings.push(...tsk.warnings);
+  if (tsk.tasks.length > 0) log(`discovery: ${directory} (${tsk.tasks[0].source}) -> ${tsk.tasks.length} task(s)`);
+  for (const task of tsk.tasks) registerTask(tasks, task, `${prefix}task`);
+
+  const mse = discoverMise(directory, root, prefix);
+  warnings.push(...mse.warnings);
+  if (mse.tasks.length > 0) log(`discovery: ${directory} (${mse.tasks[0].source}) -> ${mse.tasks.length} task(s)`);
+  for (const task of mse.tasks) registerTask(tasks, task, `${prefix}mise`);
 
   const jst = discoverJustfile(directory, prefix);
   warnings.push(...jst.warnings);
+  if (jst.tasks.length > 0) log(`discovery: ${directory} (${jst.tasks[0].source}) -> ${jst.tasks.length} task(s)`);
   for (const task of jst.tasks) registerTask(tasks, task, `${prefix}just`);
 
   const mk = discoverMakefile(directory, prefix);
   warnings.push(...mk.warnings);
+  if (mk.tasks.length > 0) log(`discovery: ${directory} (${mk.tasks[0].source}) -> ${mk.tasks.length} task(s)`);
   for (const task of mk.tasks) registerTask(tasks, task, `${prefix}make`);
 
   const cmp = discoverCompose(directory, prefix);
   warnings.push(...cmp.warnings);
+  if (cmp.tasks.length > 0) log(`discovery: ${directory} (${cmp.tasks[0].source}) -> ${cmp.tasks.length} task(s)`);
   for (const task of cmp.tasks) registerTask(tasks, task, `${prefix}compose`);
 
   return discoveredWorkspaces;
@@ -823,15 +1201,31 @@ function loadDevupToml(root, config) {
 export function discoverWorkspace(root, scanWorkspaces = true) {
   const resolvedRoot = resolve(root);
   const config = createWorkspaceConfig(resolvedRoot);
+  config.debugEvents.push(`discovery: scanning repository root ${resolvedRoot}`);
 
-  const pkgWorkspaces = discoverDirectory(resolvedRoot, resolvedRoot, config.tasks, config.warnings);
+  const pkgWorkspaces = discoverDirectory(
+    resolvedRoot,
+    resolvedRoot,
+    config.tasks,
+    config.warnings,
+    "",
+    config.debugEvents
+  );
   const tomlWorkspaces = loadDevupToml(resolvedRoot, config);
 
   if (scanWorkspaces) {
     const workspaceGlobs = tomlWorkspaces.length > 0 ? tomlWorkspaces : pkgWorkspaces;
     for (const wsDir of resolveWorkspaceDirs(resolvedRoot, workspaceGlobs)) {
       const wsName = basename(wsDir);
-      discoverDirectory(wsDir, resolvedRoot, config.tasks, config.warnings, `${wsName}:`);
+      config.debugEvents.push(`discovery: scanning workspace '${wsName}' at ${wsDir}`);
+      discoverDirectory(
+        wsDir,
+        resolvedRoot,
+        config.tasks,
+        config.warnings,
+        `${wsName}:`,
+        config.debugEvents
+      );
     }
     if (tomlWorkspaces.length > 0 || pkgWorkspaces.length > 0) {
       loadDevupToml(resolvedRoot, config);

@@ -1,9 +1,10 @@
-import { join } from "node:path";
+import { createWriteStream, mkdirSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 
 import { BOLD, CYAN, DIM, GREEN, RED, YELLOW, assignServiceColors, style, supportsColor } from "./colors.mjs";
 import { loadEnvFiles } from "./dotenv.mjs";
-import { isFile } from "./fs_utils.mjs";
+import { isFile, pathExists, which } from "./fs_utils.mjs";
 import { createTaskResult } from "./models.mjs";
 import { checkTaskPorts } from "./ports.mjs";
 import {
@@ -27,20 +28,48 @@ function formatTimestamp() {
   return `${hh}:${mm}:${ss}.${ms}`;
 }
 
+const SHELL_BUILTINS = new Set(["echo", "cd", "set", "export", "exit", "true", "false", ":"]);
+
 class OutputWriter {
-  constructor(stream, serviceColors, padWidth, useColor, timestamps, showPrefix) {
+  constructor(
+    stream,
+    serviceColors,
+    padWidth,
+    useColor,
+    timestamps,
+    showPrefix,
+    {
+      onlyServices = null,
+      excludeServices = null,
+      bufferMode = "line",
+      logStream = null,
+      verbose = false,
+    } = {}
+  ) {
     this._stream = stream;
     this._colors = serviceColors;
     this._padWidth = padWidth;
     this._useColor = useColor;
     this._timestamps = timestamps;
     this._showPrefix = showPrefix;
+    this._only = onlyServices;
+    this._exclude = excludeServices || new Set();
+    this._bufferMode = bufferMode;
+    this._buffered = new Map();
+    this._logStream = logStream;
+    this._verbose = verbose;
   }
 
-  writeLine(service, line) {
+  _serviceVisible(service) {
+    if (this._only !== null && !this._only.has(service)) return false;
+    if (this._exclude.has(service)) return false;
+    return true;
+  }
+
+  _formatServiceLine(service, line, ts = null) {
     const parts = [];
     if (this._timestamps) {
-      parts.push(style(formatTimestamp(), DIM, { enabled: this._useColor }));
+      parts.push(style(ts || formatTimestamp(), DIM, { enabled: this._useColor }));
     }
     if (this._showPrefix) {
       const tag = `[${service.padEnd(this._padWidth, " ")}]`;
@@ -48,16 +77,53 @@ class OutputWriter {
       parts.push(style(tag, BOLD, color, { enabled: this._useColor && Boolean(color) }));
     }
     const prefix = parts.join(" ");
-    const formatted = prefix ? `${prefix} ${line}` : line;
-    this._stream.write(`${formatted}\n`);
+    return prefix ? `${prefix} ${line}` : line;
+  }
+
+  _writeLogFile(tag, line, ts) {
+    if (this._logStream) {
+      this._logStream.write(`${ts} ${tag} ${line}\n`);
+    }
+  }
+
+  writeLine(service, line, forceVisible = false) {
+    const ts = formatTimestamp();
+    const rawTag = `[${service.padEnd(this._padWidth, " ")}]`;
+    this._writeLogFile(rawTag, line, ts);
+
+    if (this._bufferMode === "group" && !forceVisible) {
+      if (this._serviceVisible(service)) {
+        if (!this._buffered.has(service)) this._buffered.set(service, []);
+        this._buffered.get(service).push({ ts, line });
+      }
+      return;
+    }
+
+    if (forceVisible || this._serviceVisible(service)) {
+      this._stream.write(`${this._formatServiceLine(service, line, ts)}\n`);
+    }
+  }
+
+  flushService(service) {
+    const entries = this._buffered.get(service);
+    if (!entries || entries.length === 0) return;
+    this._buffered.delete(service);
+    for (const { ts, line } of entries) {
+      this._stream.write(`${this._formatServiceLine(service, line, ts)}\n`);
+    }
   }
 
   writeSystem(message, colorCode = CYAN) {
-    const tsPrefix = this._timestamps
-      ? `${style(formatTimestamp(), DIM, { enabled: this._useColor })} `
-      : "";
+    const ts = formatTimestamp();
+    this._writeLogFile("[devup]", message, ts);
+    const tsPrefix = this._timestamps ? `${style(ts, DIM, { enabled: this._useColor })} ` : "";
     const tag = style("[devup]", BOLD, colorCode, { enabled: this._useColor });
     this._stream.write(`${tsPrefix}${tag} ${message}\n`);
+  }
+
+  writeDebug(message) {
+    if (!this._verbose) return;
+    this.writeSystem(`[debug] ${message}`, DIM);
   }
 }
 
@@ -174,6 +240,64 @@ function printSummary(writer, results, useColor, interrupted) {
   writer.writeSystem(`${header}: ${parts.join(" | ")}`, CYAN);
 }
 
+function expandFilterNames(config, rawItems) {
+  const expanded = new Set();
+  for (const item of rawItems) {
+    for (const part of String(item).split(",")) {
+      const name = part.trim();
+      if (!name) continue;
+      if (Object.hasOwn(config.groups, name)) {
+        for (const member of config.groups[name]) expanded.add(member);
+      } else {
+        expanded.add(name);
+      }
+    }
+  }
+  return expanded;
+}
+
+function splitCommandTokens(cmd) {
+  const tokens = [];
+  let current = "";
+  let quote = null;
+  for (let i = 0; i < cmd.length; i += 1) {
+    const ch = cmd[i];
+    if (quote) {
+      if (ch === quote) quote = null;
+      else current += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      if (current) {
+        tokens.push(current);
+        current = "";
+      }
+    } else {
+      current += ch;
+    }
+  }
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function missingExecutableHint(task, root) {
+  const tokens = splitCommandTokens(task.command);
+  if (tokens.length === 0) return null;
+  const head = tokens[0];
+  if (!head || SHELL_BUILTINS.has(head.toLowerCase()) || head.includes("=")) return null;
+  if (head.includes("/") || head.includes("\\")) {
+    const target = isAbsolute(head) ? head : join(task.cwd || root, head);
+    if (!pathExists(target)) {
+      return `Executable '${head}' not found for task '${task.name}' (command: \`${task.command}\`, cwd: ${task.cwd || root}, repo: ${root}).`;
+    }
+    return null;
+  }
+  if (!which(head)) {
+    return `Executable '${head}' not found on PATH for task '${task.name}' (command: \`${task.command}\`, repo: ${root}). Install '${head}' or run \`devup doctor\`.`;
+  }
+  return null;
+}
+
 export async function runTasks(config, targets, options = {}, stream = process.stdout, abortSignal = null) {
   const opts = {
     failFast: null,
@@ -188,6 +312,11 @@ export async function runTasks(config, targets, options = {}, stream = process.s
     strictPorts: null,
     watch: false,
     watchInterval: 0.4,
+    only: [],
+    exclude: [],
+    bufferMode: "line",
+    saveLogs: null,
+    verbose: false,
     ...options,
   };
 
@@ -201,9 +330,35 @@ export async function runTasks(config, targets, options = {}, stream = process.s
   const orderedNames = expandDependencies(config, targets);
   if (orderedNames.length === 0) return [];
 
+  const onlySet = opts.only && opts.only.length > 0 ? expandFilterNames(config, opts.only) : null;
+  const excludeSet =
+    opts.exclude && opts.exclude.length > 0 ? expandFilterNames(config, opts.exclude) : new Set();
+
+  let logStream = null;
+  if (opts.saveLogs && !opts.dryRun) {
+    mkdirSync(dirname(opts.saveLogs), { recursive: true });
+    logStream = createWriteStream(opts.saveLogs, { flags: "a", encoding: "utf8" });
+  }
+
+  const debugEnv = String(process.env.DEVUP_DEBUG || "").toLowerCase();
+  const verbose = Boolean(opts.verbose || debugEnv === "1" || debugEnv === "true" || debugEnv === "yes");
+
   const padWidth = Math.min(24, Math.max(...orderedNames.map((n) => n.length)));
   const colors = assignServiceColors(orderedNames, useColor);
-  const writer = new OutputWriter(out, colors, padWidth, useColor, opts.timestamps, opts.prefix);
+  const writer = new OutputWriter(out, colors, padWidth, useColor, opts.timestamps, opts.prefix, {
+    onlyServices: onlySet,
+    excludeServices: excludeSet,
+    bufferMode: opts.bufferMode,
+    logStream,
+    verbose,
+  });
+
+  for (const ev of config.debugEvents || []) {
+    writer.writeDebug(ev);
+  }
+  writer.writeDebug(
+    `execution plan: targets=[${orderedNames.join(", ")}], buffer=${opts.bufferMode}, failFast=${failFast}`,
+  );
 
   if (opts.dryRun) {
     writer.writeSystem(`Dry run execution plan (${orderedNames.length} task(s)):`, CYAN);
@@ -213,7 +368,7 @@ export async function runTasks(config, targets, options = {}, stream = process.s
       const depsNote =
         task.dependsOn.length > 0 ? ` (after: ${task.dependsOn.join(", ")})` : "";
       const cwdNote = ` @ ${task.cwd || config.root}`;
-      writer.writeLine(name, `${task.command}${depsNote}${cwdNote}`);
+      writer.writeLine(name, `${task.command}${depsNote}${cwdNote}`, true);
       results.push(createTaskResult({ name, exitCode: 0, durationSeconds: 0.0, status: "ok" }));
     }
     return results;
@@ -221,11 +376,16 @@ export async function runTasks(config, targets, options = {}, stream = process.s
 
   const workspaceEnvLoaded = loadWorkspaceDotenv(config, opts);
   const workspaceDotenv = workspaceEnvLoaded.env;
+  const envKeys = Object.keys(workspaceDotenv).sort();
+  if (envKeys.length > 0) {
+    writer.writeDebug(`loaded ${envKeys.length} env key(s) from root/workspace .env files: ${envKeys.join(", ")}`);
+  }
   for (const warn of workspaceEnvLoaded.warnings) {
     writer.writeSystem(warn, YELLOW);
   }
 
   if (opts.portCheck) {
+    writer.writeDebug(`running pre-flight port check across ${orderedNames.length} task(s)`);
     const conflicts = await checkTaskPorts(config.tasks, orderedNames);
     if (conflicts.length > 0) {
       for (const conflict of conflicts) {
@@ -235,6 +395,7 @@ export async function runTasks(config, targets, options = {}, stream = process.s
         );
       }
       if (strictPorts) {
+        if (logStream) await new Promise((r) => logStream.end(r));
         const conflictByTask = new Map(conflicts.map((c) => [c.taskName, c]));
         return orderedNames.map((name) => {
           const c = conflictByTask.get(name);
@@ -511,6 +672,7 @@ export async function runTasks(config, targets, options = {}, stream = process.s
       const duration = (Date.now() - startMs) / 1000;
 
       if (restartRequested && !stopRequested) {
+        writer.flushService(name);
         readyGates[name].set();
         env = buildTaskEnv(config, task, workspaceDotenv).env;
         continue;
@@ -532,6 +694,7 @@ export async function runTasks(config, targets, options = {}, stream = process.s
         }
       }
 
+      writer.flushService(name);
       readyGates[name].set();
       resultsMap.set(
         name,
@@ -546,18 +709,29 @@ export async function runTasks(config, targets, options = {}, stream = process.s
       if (status === "ok") {
         writer.writeLine(
           name,
-          style(`exited with code 0 (${duration.toFixed(2)}s)`, GREEN, { enabled: useColor })
+          style(`exited with code 0 (${duration.toFixed(2)}s)`, GREEN, { enabled: useColor }),
+          true
         );
       } else if (status === "stopped") {
         writer.writeLine(
           name,
-          style(`stopped (${duration.toFixed(2)}s)`, YELLOW, { enabled: useColor })
+          style(`stopped (${duration.toFixed(2)}s)`, YELLOW, { enabled: useColor }),
+          true
         );
       } else {
         writer.writeLine(
           name,
-          style(`exited with code ${exitCode} (${duration.toFixed(2)}s)`, RED, { enabled: useColor })
+          style(
+            `exited with code ${exitCode} (${duration.toFixed(2)}s) — cmd: \`${task.command}\` @ ${task.cwd || config.root}`,
+            RED,
+            { enabled: useColor }
+          ),
+          true
         );
+        const hint = missingExecutableHint(task, config.root);
+        if (hint) {
+          writer.writeLine(name, style(hint, YELLOW, { enabled: useColor }), true);
+        }
         if (failFast && !isWatched && !stopRequested) {
           await stopAll(
             `Task '${name}' exited with code ${exitCode} — stopping remaining services...`,
@@ -604,5 +778,8 @@ export async function runTasks(config, targets, options = {}, stream = process.s
     .filter((name) => resultsMap.has(name))
     .map((name) => resultsMap.get(name));
   printSummary(writer, orderedResults, useColor, interrupted);
+  if (logStream) {
+    await new Promise((resolve) => logStream.end(resolve));
+  }
   return orderedResults;
 }

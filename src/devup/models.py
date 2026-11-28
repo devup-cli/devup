@@ -45,6 +45,7 @@ class WorkspaceConfig:
     fail_fast: bool = True
     shutdown_timeout: float = 5.0
     warnings: list[str] = field(default_factory=list)
+    debug_events: list[str] = field(default_factory=list)
 
 
 @dataclass(slots=True)

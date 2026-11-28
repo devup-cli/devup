@@ -11,7 +11,7 @@ _devup_complete() {
     prev="${COMP_WORDS[COMP_CWORD-1]}"
 
     local subcommands="list ls run pick init validate doctor completion"
-    local flags="--help --version --cwd --no-workspaces --timestamps --no-prefix --keep-going --dry-run --watch --env-file --no-dotenv --no-port-check --strict-ports --check-updates --no-update-check --color --no-color --json --force --template --interactive --yes --online"
+    local flags="--help --version --cwd --no-workspaces --timestamps --no-prefix --keep-going --dry-run --watch --only --exclude --buffer --save-logs --verbose --debug --env-file --no-dotenv --no-port-check --strict-ports --check-updates --no-update-check --color --no-color --json --force --template --interactive --yes --online"
 
     if [[ "${prev}" == "completion" ]]; then
         COMPREPLY=( $(compgen -W "bash zsh fish powershell" -- "${cur}") )
@@ -118,7 +118,7 @@ _POWERSHELL_COMPLETION = r"""# PowerShell completion for devup
 Register-ArgumentCompleter -Native -CommandName devup -ScriptBlock {
     param($wordToComplete, $commandAst, $cursorPosition)
     $subcommands = @('list', 'ls', 'run', 'pick', 'init', 'validate', 'doctor', 'completion')
-    $flags = @('--help', '--version', '--cwd', '--watch', '--env-file', '--no-dotenv', '--strict-ports', '--no-port-check', '--keep-going', '--dry-run', '--timestamps', '--no-prefix', '--json', '--force', '--template', '--interactive', '--yes', '--online', '--check-updates', '--no-update-check')
+    $flags = @('--help', '--version', '--cwd', '--watch', '--only', '--exclude', '--buffer', '--save-logs', '--verbose', '--debug', '--env-file', '--no-dotenv', '--strict-ports', '--no-port-check', '--keep-going', '--dry-run', '--timestamps', '--no-prefix', '--json', '--force', '--template', '--interactive', '--yes', '--online', '--check-updates', '--no-update-check')
 
     $tokens = $commandAst.CommandElements | ForEach-Object { $_.ToString() }
     if ($tokens.Count -ge 2 -and $tokens[1] -eq 'completion') {

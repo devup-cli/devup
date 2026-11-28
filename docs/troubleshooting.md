@@ -3,7 +3,13 @@
 ## Common Issues
 
 ### A discovered task isn't executable because the runner isn't installed
-Run `devup doctor` to see which external runners (`pnpm`, `poetry`, `mvn`, `gradle`, `docker`, `make`, `just`) are missing from your `PATH`.
+Run `devup doctor` to see which external runners (`pnpm`, `poetry`, `mvn`, `gradle`, `docker`, `make`, `just`, `cargo`, `go`, `task`, `mise`) are missing from your `PATH`. When a command fails to spawn, `devup` reports the missing executable, exact command, and working directory (`cwd`).
+
+### Verbose diagnostics & noisy multi-service logs
+- Pass `-v` / `--verbose` / `--debug` (or set `DEVUP_DEBUG=1`) to trace workspace scanning order, `.env` loading, and execution planning.
+- Filter noisy services without stopping them via `--only api,web` or `--exclude db`.
+- Use `--buffer group` to keep each service's output grouped contiguously instead of interleaved lines, and combine with `--save-logs logs/dev.log` to archive unfiltered output for every service.
+- Malformed `package.json`, `pyproject.toml`, `Cargo.toml`, `mise.toml`, `pom.xml`, or `devup.toml` files report both the repository root and manifest path as warnings.
 
 ### Port already in use warning or error
 `devup` checks `port` / `ports` (and `--port` / `PORT=` flags) before launching services.

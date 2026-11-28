@@ -57,6 +57,7 @@ export function createWorkspaceConfig(root) {
     failFast: true,
     shutdownTimeout: 5.0,
     warnings: [],
+    debugEvents: [],
   };
 }
 

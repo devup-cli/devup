@@ -1,0 +1,6 @@
+[project]
+name = "polyglot-auth"
+version = "0.1.0"
+
+[tool.poe.tasks]
+serve = "python server.py"

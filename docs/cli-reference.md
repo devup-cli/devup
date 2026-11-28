@@ -34,7 +34,7 @@ Validates `devup.toml`, group expansions, task `depends_on` references, dependen
 - Exit code `0` when valid, `1` when errors are found.
 
 ### `devup doctor`
-Inspects the local environment: Python/OS details, `devup` version, detected external runners (`git`, `node`, `npm`, `pnpm`, `yarn`, `bun`, `poetry`, `pdm`, `hatch`, `poe`, `make`, `just`, `docker`, `java`, `mvn`, `gradle`), discovered task count, and config validation status. Runs **offline by default**.
+Inspects the local environment: Python/OS details, `devup` version, detected external runners (`git`, `node`, `npm`, `pnpm`, `yarn`, `bun`, `poetry`, `pdm`, `hatch`, `poe`, `make`, `just`, `docker`, `java`, `mvn`, `gradle`, `cargo`, `go`, `task`, `mise`), discovered task count, and config validation status. Runs **offline by default**.
 - `--json` — Output a shareable diagnostic JSON report with sensitive data automatically redacted (user home directories, OS usernames, URL userinfo credentials `scheme://user:pass@`, `KEY=VALUE` / `Bearer` / `Basic` / JWT tokens, CLI secret flags, and sensitive environment variable values).
 - `--online` — Opt in to checking PyPI for whether a newer `devup-cli` version is available.
 
@@ -50,6 +50,11 @@ Outputs a shell autocompletion script to stdout. Supported shells: `bash`, `zsh`
 | `--no-workspaces` | Disable monorepo/multi-module subdirectory scanning. |
 | `-t`, `--timestamps` | Prepend `HH:MM:SS.mmm` timestamps to log lines. |
 | `--no-prefix` | Disable `[service]` prefixes on log lines. |
+| `--only <names>` | Show terminal logs only for the specified task(s) or group(s) (repeatable or comma-separated); all selected tasks still run. |
+| `--exclude <names>` | Hide terminal logs for the specified task(s) or group(s) (repeatable or comma-separated). |
+| `--buffer <line\|group>` | Stream log lines immediately (`line`, default) or buffer per-service output into contiguous blocks (`group`). |
+| `--save-logs <path>` | Write unfiltered logs from all services (with timestamps and `[service]` prefixes) to a file while `--only`/`--exclude` filters console output. |
+| `-v`, `--verbose`, `--debug` | Print diagnostic discovery and execution trace messages (`[debug]`, also enabled via `DEVUP_DEBUG=1`). |
 | `--keep-going` | Keep sibling services running if one exits with a non-zero code. |
 | `--dry-run` | Print the resolved dependency order and commands without starting processes. |
 | `-w`, `--watch` | Watch task working directories and auto-restart tasks when files change. |

@@ -37,6 +37,10 @@ jobs:
       - name: Run unit tests
         run: python -W error -m unittest discover -s tests -v
 
+      - name: Enforce Python test coverage threshold
+        if: matrix.python-version == '3.12' && matrix.os != 'macos-latest'
+        run: python -W error scripts/check_coverage.py --min-coverage 65
+
       - name: Install package
         run: python -m pip install .
 
@@ -139,7 +143,12 @@ jobs:
           node-version: ${{ matrix.node-version }}
       - name: Run npm package unit tests
         working-directory: packages/npm
+        if: matrix.node-version != '22'
         run: npm test
+      - name: Run npm package unit tests with coverage threshold
+        working-directory: packages/npm
+        if: matrix.node-version == '22'
+        run: node --test --experimental-test-coverage --test-coverage-lines=70
       - name: Verify npm pack and global tarball install
         shell: bash
         working-directory: packages/npm

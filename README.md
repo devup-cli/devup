@@ -12,7 +12,7 @@
 
 **Zero-dependency polyglot script discovery and multi-service parallel runner.**
 
-`devup` scans your repository for runnable scripts and services across `devup.toml`, `package.json`, `pyproject.toml`, `pom.xml` (Maven), `build.gradle(.kts)` (Gradle), `Justfile`, `Makefile`, and `docker-compose.yml`, then runs one or many of them concurrently with color-coded prefixed logs and clean process-tree shutdown on `Ctrl+C`.
+`devup` scans your repository for runnable scripts and services across `devup.toml`, `package.json`, `pyproject.toml`, `Cargo.toml`, `go.mod` / `go.work`, `Taskfile.yml`, `mise.toml`, `pom.xml` (Maven), `build.gradle(.kts)` (Gradle), `Justfile`, `Makefile`, and `docker-compose.yml`, then runs one or many of them concurrently with color-coded prefixed logs and clean process-tree shutdown on `Ctrl+C`.
 
 Try it in 5 seconds with no permanent install:
 
@@ -42,13 +42,17 @@ Zero third-party runtime dependencies — pure Python 3.11+ standard library.
   - `pyproject.toml` (supports Poe the Poet, PDM, Hatch, Poetry scripts, and `[project.scripts]`)
   - `pom.xml` (Maven lifecycle goals, Spring Boot / Quarkus / Exec plugins, `mvnw` / `mvnw.cmd` wrappers, and `<modules>`)
   - `build.gradle` / `build.gradle.kts` (Gradle tasks, `bootRun`, `run`, `gradlew` / `gradlew.bat` wrappers, and `settings.gradle(.kts)` subprojects)
+  - `Cargo.toml` (Cargo workspace members, `[[bin]]` / `[[example]]` targets, `[package.metadata.scripts]`, plus `build`/`run`/`test`/`check`/`clippy`/`fmt`)
+  - `go.mod` / `go.work` (Go module `build`/`test`/`vet`, root/cmd entrypoints `go run ./cmd/<name>`, and multi-module workspaces)
+  - `Taskfile.yml` / `Taskfile.yaml` (`task <name>` recipes + descriptions, skipping `internal: true`)
+  - `mise.toml` / `.mise.toml` / `.config/mise.toml` (`mise run <name>` tasks + descriptions, skipping `hide = true`)
   - `Justfile` / `justfile` (recipes + doc comments)
   - `Makefile` / `GNUmakefile` (targets + `#` / `##` doc comments)
   - `compose.yaml` / `docker-compose.yml` (`compose:up`, `compose:down`, and per-service `compose:<service>`)
   - `devup.toml` (custom tasks, service groups, defaults, working directories, env vars, `depends_on`, and readiness checks)
 - **Parallel runner with readable logs:**
   - Distinct ANSI colors and aligned `[service]` prefixes per process
-  - Optional `--timestamps` and `--no-prefix` modes
+  - Log filtering (`--only` / `--exclude`), per-service contiguous output (`--buffer group`), persistent log capture (`--save-logs`), `-v`/`--verbose`/`DEVUP_DEBUG=1` trace output, `--timestamps`, and `--no-prefix`
 - **Clean shutdown & fail-fast:**
   - Stops all sibling services if one crashes (override with `--keep-going`)
   - Kills full process trees on `Ctrl+C` (process groups on POSIX; `CTRL_BREAK_EVENT` + `taskkill /T` fallback on Windows) so child reloaders don't leak ports
@@ -190,6 +194,8 @@ depends_on = ["api"]
 * [5-Minute Getting Started](docs/getting-started.md)
 * [CLI Command Reference](docs/cli-reference.md)
 * [`devup.toml` Configuration Reference](docs/configuration.md)
+* [Manifest Scanners & Discovery](docs/scanners.md)
+* [Architecture Overview](docs/architecture.md)
 * [Troubleshooting & FAQ](docs/troubleshooting.md)
 * [Examples](examples/README.md)
 
@@ -197,4 +203,6 @@ depends_on = ["api"]
 
 ```bash
 python -m unittest discover -s tests -v
+python scripts/check_coverage.py --min-coverage 65
+cd packages/npm && npm run test:coverage
 ```

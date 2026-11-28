@@ -72,6 +72,10 @@ _TOOL_BINARIES = (
     "java",
     "mvn",
     "gradle",
+    "cargo",
+    "go",
+    "task",
+    "mise",
 )
 
 _SENSITIVE_KEY_RE = re.compile(
