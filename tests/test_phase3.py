@@ -434,7 +434,8 @@ time.sleep(30)
                 'raise SystemExit(1)"'
             )
             toml_text = (ex_dir / "devup.toml").read_text(encoding="utf-8")
-            toml_text = toml_text.replace('command = "python server.py"', f"command = {json.dumps(f'\"{sys.executable}\" server.py')}")
+            auth_cmd = f'"{sys.executable}" server.py'
+            toml_text = toml_text.replace('command = "python server.py"', f"command = {json.dumps(auth_cmd)}")
             (work / "devup.toml").write_text(
                 toml_text + f'\n[tasks.check]\ncommand = {json.dumps(probe_cmd)}\ndepends_on = ["gateway"]\n',
                 encoding="utf-8",

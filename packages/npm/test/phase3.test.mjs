@@ -158,7 +158,7 @@ command = "node -e \\"console.log('SLEEPING'); setTimeout(() => {}, 15000)\\""
     const envRes = await runTasks(cfg, resolveTargets(cfg, ["envprobe", "up_fail", "down_skip"]), {
       color: false,
       portCheck: false,
-      keepGoing: true,
+      failFast: false,
     }, envOut);
     const byName = Object.fromEntries(envRes.map((r) => [r.name, r]));
     assert.equal(byName.envprobe.status, "ok");
