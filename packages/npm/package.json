@@ -4,8 +4,8 @@
   "description": "Polyglot project script discovery and multi-service parallel runner with colored logs and clean Ctrl+C shutdown.",
   "type": "module",
   "bin": {
-    "devup": "./bin/devup.js",
-    "devup-node": "./bin/devup.js"
+    "devup": "bin/devup.js",
+    "devup-node": "bin/devup.js"
   },
   "files": [
     "bin/",
